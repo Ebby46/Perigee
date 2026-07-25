@@ -19,15 +19,50 @@ use soroban_sdk::xdr::{
     Preconditions, ReadXdr, SequenceNumber, SignatureHint, TimeBounds, TimePoint, Transaction,
     TransactionEnvelope, TransactionExt, TransactionV1Envelope, Uint256, WriteXdr,
 };
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use stellar_strkey::Strkey;
 use utoipa::ToSchema;
 
 const CHALLENGE_EXPIRY_SECS: u64 = 300;
 const JWT_EXPIRY_SECS: u64 = 86400;
 const WEB_AUTH_DOMAIN: &str = "Perigee";
+
+const RATE_LIMIT_CAPACITY: f64 = 60.0;
+const RATE_LIMIT_REFILL_RATE: f64 = 1.0; // Refills 1 token per second (60 requests/minute)
+
+#[derive(Debug, Clone)]
+pub struct TokenBucket {
+    tokens: f64,
+    last_update: Instant,
+}
+
+impl TokenBucket {
+    pub fn new(capacity: f64) -> Self {
+        Self {
+            tokens: capacity,
+            last_update: Instant::now(),
+        }
+    }
+
+    pub fn consume(&mut self, capacity: f64, refill_rate: f64, amount: f64) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_update).as_secs_f64();
+        self.last_update = now;
+
+        self.tokens = (self.tokens + elapsed * refill_rate).min(capacity);
+
+        if self.tokens >= amount {
+            self.tokens -= amount;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 pub struct AuthState {
     pub encoding_key: EncodingKey,
@@ -40,6 +75,8 @@ pub struct AuthState {
     /// Emergency pause flag for message verification.
     /// When true, all verification endpoints reject requests.
     pub emergency_verification_paused: Arc<AtomicBool>,
+    /// Thread-safe map of token buckets keyed by authenticated tenant (Stellar address)
+    pub rate_limiter: Mutex<HashMap<String, TokenBucket>>,
 }
 
 impl AuthState {
@@ -89,6 +126,7 @@ impl AuthState {
             server_public_key,
             network_passphrase,
             emergency_verification_paused: Arc::new(AtomicBool::new(emergency_verification_paused)),
+            rate_limiter: Mutex::new(HashMap::new()),
         }
     }
 
@@ -505,6 +543,22 @@ pub async fn auth_middleware(
         ));
     }
 
+    // Rate limiting per manager/tenant (Stellar address)
+    let tenant = token_data.claims.sub.clone();
+    {
+        let mut rate_limiter = state.rate_limiter.lock().unwrap();
+        let bucket = rate_limiter
+            .entry(tenant.clone())
+            .or_insert_with(|| TokenBucket::new(RATE_LIMIT_CAPACITY));
+
+        if !bucket.consume(RATE_LIMIT_CAPACITY, RATE_LIMIT_REFILL_RATE, 1.0) {
+            return Err(AppError::TooManyRequests(format!(
+                "Rate limit exceeded for tenant {}",
+                tenant
+            )));
+        }
+    }
+
     Ok(next.run(req).await)
 }
 
@@ -646,5 +700,13 @@ mod tests {
             e: state.jwk_e.clone(),
             use_: "sig".to_string(),
         };
+    }
+
+    #[test]
+    fn test_token_bucket_rate_limiter() {
+        let mut bucket = TokenBucket::new(2.0);
+        assert!(bucket.consume(2.0, 1.0, 1.0));
+        assert!(bucket.consume(2.0, 1.0, 1.0));
+        assert!(!bucket.consume(2.0, 1.0, 1.0));
     }
 }

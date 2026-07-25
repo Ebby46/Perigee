@@ -23,6 +23,9 @@ pub enum AppError {
 
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
+
+    #[error("Too many requests: {0}")]
+    TooManyRequests(String),
 }
 
 #[derive(Serialize, ToSchema)]
@@ -40,6 +43,7 @@ impl AppError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
         }
     }
 
@@ -49,6 +53,7 @@ impl AppError {
             Self::NotFound(_) => "NOT_FOUND",
             Self::BadRequest(_) => "BAD_REQUEST",
             Self::Unauthorized(_) => "UNAUTHORIZED",
+            Self::TooManyRequests(_) => "TOO_MANY_REQUESTS",
         }
     }
 }
