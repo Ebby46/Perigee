@@ -2171,6 +2171,7 @@ async fn main() {
         .layer(cors)
         .layer(crate::middleware::correlation_id_middleware)
         .layer(TraceLayer::new_for_http())
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 2)) // 2 MB limit
         .with_state(app_state); // ← thread AppState through all handlers
 
     let bind_addr = format!("0.0.0.0:{}", config.server_port);
