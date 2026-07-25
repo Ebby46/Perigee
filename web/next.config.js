@@ -10,6 +10,13 @@ const nextConfig = {
   // Remove this comment and any Pages Router-specific config after full migration to App Router.
   // See MIGRATION.md for incremental migration plan.
   useFileSystemPublicRoutes: true,
+
+  // Pin to current stable behaviour
+  // Remove experimental flag when migrating to App Router
+  experimental: {
+    // App Router will be enabled incrementally
+    // See MIGRATION.md for migration phases
+  },
 };
 
 module.exports = nextConfig;
