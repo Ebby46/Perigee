@@ -3346,6 +3346,7 @@ pub fn profile_contract_with_flamegraph(
 mod tests {
     use super::*;
     use crate::cache::SimulationCache;
+    use crate::config::TESTNET_DEFAULT_CONTRACT_ID;
 
     #[test]
     fn test_soroban_resources_default() {
@@ -3693,7 +3694,7 @@ mod tests {
 
         let result = engine
             .simulate_locally(
-                "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+                TESTNET_DEFAULT_CONTRACT_ID,
                 "hello",
                 vec![],
                 overrides,
@@ -3823,7 +3824,7 @@ mod tests {
     fn test_parse_contract_id_valid() {
         let engine = SimulationEngine::new("https://test.com".to_string());
         let result =
-            engine.parse_contract_id("CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC");
+            engine.parse_contract_id(TESTNET_DEFAULT_CONTRACT_ID);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 32);
     }
@@ -3841,7 +3842,7 @@ mod tests {
     fn test_create_invoke_transaction() {
         let engine = SimulationEngine::new("https://test.com".to_string());
         let result = engine.create_invoke_transaction(
-            "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+            TESTNET_DEFAULT_CONTRACT_ID,
             "hello",
             vec!["true".to_string(), "42".to_string()],
         );
