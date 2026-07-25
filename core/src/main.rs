@@ -1525,7 +1525,8 @@ pub struct FeeAnalyticsEnvelope {
 #[openapi(
     paths(
         analyze, analyze_wasm, optimize_limits, compare_handler,
-        auth::challenge_handler, auth::verify_handler, auth::jwks_handler,
+        auth::challenge_handler, auth::verify_handler, auth::refresh_handler,
+        auth::revoke_handler, auth::jwks_handler,
         fee_recommend, fee_history, fee_analytics
     ),
     components(schemas(
@@ -1538,7 +1539,8 @@ pub struct FeeAnalyticsEnvelope {
         crate::wasm_branch_analysis::BranchTypeBreakdown,
         crate::wasm_branch_analysis::PathResult,
         auth::ChallengeRequest, auth::ChallengeResponse,
-        auth::VerifyRequest, auth::VerifyResponse,
+        auth::VerifyRequest, auth::VerifyResponse, auth::RefreshRequest,
+        auth::RevokeResponse,
         auth::JwkSetResponse, auth::JwkResponse,
         crate::simulation::OptimizationBuffer,
         crate::simulation::SorobanResources,
@@ -2143,6 +2145,8 @@ async fn main() {
         .route("/metrics", get(metrics_handler))
         .route("/auth/challenge", post(auth::challenge_handler))
         .route("/auth/verify", post(auth::verify_handler))
+        .route("/auth/refresh", post(auth::refresh_handler))
+        .route("/auth/revoke", post(auth::revoke_handler))
         .route("/auth/emergency-pause", post(auth::emergency_pause_handler))
         .route("/auth/jwks", get(auth::jwks_handler))
         // Fee market routes (public access)
