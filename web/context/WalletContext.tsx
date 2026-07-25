@@ -3,6 +3,7 @@
 import React, { useEffect } from "react";
 import type { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit";
 import { createStore, createUseStore, shallow } from "../lib/createStore";
+import { logger } from "../lib/logger";
 
 interface WalletState {
   connect: (moduleId: string) => Promise<void>;
@@ -59,7 +60,7 @@ const walletStore = createStore<WalletState>((set, get) => ({
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : "Connection failed";
       set({ error: errorMessage });
-      console.error("Wallet connection failed:", err);
+      logger.error("Wallet connection failed:", err);
     } finally {
       set({ isConnecting: false });
     }
@@ -70,9 +71,9 @@ const walletStore = createStore<WalletState>((set, get) => ({
     if (kit) {
       try {
         await kit.disconnect();
-      } catch (err) {
-        console.error("Disconnect error:", err);
-      }
+} catch (err) {
+      logger.error("Disconnect error:", err);
+    }
     }
     set({ address: null, selectedWalletId: null, error: null });
     localStorage.removeItem("inheritx_wallet_address");
@@ -111,17 +112,17 @@ async function initWalletKit() {
         walletStore.setState({ address: walletAddress, selectedWalletId: savedWalletId });
         sessionStorage.setItem("perigee_wallet_id", savedWalletId);
       } catch (err) {
-        console.error("Auto-reconnect failed:", err);
+        logger.error("Auto-reconnect failed:", err);
         localStorage.removeItem("inheritx_wallet_address");
         localStorage.removeItem("inheritx_wallet_id");
         sessionStorage.removeItem("perigee_wallet_id");
       }
     }
-  } catch (err) {
-    console.error("Failed to initialize wallet kit:", err);
-    walletStore.setState({ error: "Failed to load wallet kit" });
+} catch (err) {
+      logger.error("Failed to initialize wallet kit:", err);
+      walletStore.setState({ error: "Failed to load wallet kit" });
+    }
   }
-}
 
 const useWalletStoreImpl = createUseStore(walletStore);
 

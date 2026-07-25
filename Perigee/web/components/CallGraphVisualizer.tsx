@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef } from 'react';
 import mermaid from 'mermaid';
+import { logger } from '../lib/logger';
 
 interface CallGraphVisualizerProps {
   mermaidDefinition: string;
@@ -31,7 +32,7 @@ export function CallGraphVisualizer({ mermaidDefinition }: CallGraphVisualizerPr
           const { svg } = await mermaid.render('mermaid-graph-' + Date.now(), mermaidDefinition);
           containerRef.current.innerHTML = svg;
         } catch (error) {
-          console.error('Mermaid rendering failed:', error);
+          logger.error('Mermaid rendering failed:', error);
           containerRef.current.innerHTML = `<p style="color: #fb8500;">Failed to render call graph: ${error}</p>`;
         }
       }
