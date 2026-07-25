@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     progress_message VARCHAR(255) NOT NULL DEFAULT 'Queued',
     webhook_url VARCHAR(500),
     webhook_headers JSONB,
+    -- Stores an Argon2 hash of the webhook secret, never the plaintext value.
     webhook_secret VARCHAR(255),
     error_message TEXT,
     error_type VARCHAR(50),

@@ -7,6 +7,7 @@
 
 use crate::insights::InsightsEngine;
 use crate::reconciliation::{FeeReconciler, ReconciliationReport};
+use crate::secret_hash;
 use crate::simulation::{SimulationEngine, SimulationResult, SorobanResources};
 use crate::ws::SimulationBus;
 use crate::AppError;
@@ -179,6 +180,9 @@ pub struct WebhookConfig {
     pub callback_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
+    /// Plaintext secret supplied by the caller. Only an Argon2 hash of this
+    /// value is ever persisted (see `secret_hash::hash_secret`); it cannot
+    /// be read back once stored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
 }
@@ -195,7 +199,10 @@ pub struct Job {
     pub progress_message: String,
     pub webhook_url: Option<String>,
     pub webhook_headers: Option<Value>,
-    pub webhook_secret: Option<String>,
+    /// Argon2 hash of the webhook secret (see `secret_hash`). The plaintext
+    /// secret is never persisted and cannot be recovered from this value.
+    #[sqlx(rename = "webhook_secret")]
+    pub webhook_secret_hash: Option<String>,
     pub error_message: Option<String>,
     pub error_type: Option<String>,
     pub timeout_secs: i32,
@@ -232,7 +239,9 @@ impl Job {
                 .webhook_headers
                 .as_ref()
                 .and_then(|h| serde_json::from_value(h.clone()).ok()),
-            secret: self.webhook_secret.clone(),
+            // Only an Argon2 hash is stored; the original secret is not
+            // recoverable and therefore cannot be reconstructed here.
+            secret: None,
         })
     }
 }
@@ -339,12 +348,20 @@ impl JobQueue {
             JobError::ProcessingFailed(format!("Failed to serialize payload: {}", e))
         })?;
 
-        let (webhook_url, webhook_headers, webhook_secret) = match webhook {
+        let (webhook_url, webhook_headers, webhook_secret_hash) = match webhook {
             Some(w) => (
                 Some(w.callback_url),
                 w.headers
                     .map(|h| serde_json::to_value(h).unwrap_or_default()),
-                w.secret,
+                w.secret
+                    .as_deref()
+                    .map(secret_hash::hash_secret)
+                    .transpose()
+                    .map_err(|e| {
+                        JobError::ProcessingFailed(format!(
+                            "Failed to hash webhook secret: {e}"
+                        ))
+                    })?,
             ),
             None => (None, None, None),
         };
@@ -363,7 +380,7 @@ impl JobQueue {
                 .bind(&payload_json)
                 .bind(&webhook_url)
                 .bind(&webhook_headers)
-                .bind(&webhook_secret)
+                .bind(&webhook_secret_hash)
                 .bind(self.config.job_timeout_secs as i32)
                 .execute(pool)
                 .await?;
@@ -381,7 +398,7 @@ impl JobQueue {
                 .bind(&payload_json)
                 .bind(&webhook_url)
                 .bind(&webhook_headers)
-                .bind(&webhook_secret)
+                .bind(&webhook_secret_hash)
                 .bind(self.config.job_timeout_secs as i32)
                 .execute(pool)
                 .await?;
@@ -719,7 +736,7 @@ impl JobQueue {
             progress_message: row.try_get("progress_message")?,
             webhook_url: row.try_get("webhook_url")?,
             webhook_headers: row.try_get("webhook_headers")?,
-            webhook_secret: row.try_get("webhook_secret")?,
+            webhook_secret_hash: row.try_get("webhook_secret")?,
             error_message: row.try_get("error_message")?,
             error_type: row.try_get("error_type")?,
             timeout_secs: row.try_get("timeout_secs")?,

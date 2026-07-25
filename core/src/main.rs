@@ -19,6 +19,7 @@ pub mod reconciliation;
 mod routing;
 pub mod rpc_provider;
 mod runner;
+mod secret_hash;
 mod simulation;
 mod simulation_service;
 mod stellar_service;
