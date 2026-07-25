@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+use crate::metrics::Metrics;
+
 const CIRCUIT_BREAKER_THRESHOLD: u64 = 3;
 const CIRCUIT_BREAKER_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -252,6 +254,8 @@ pub struct ProviderRegistry {
     instance_id: String,
     public_base_url: Option<String>,
     latency_cursor: AtomicUsize,
+    /// Optional Prometheus metrics handle; absent in tests / CLI paths.
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl ProviderRegistry {
