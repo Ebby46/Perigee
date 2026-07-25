@@ -2,12 +2,12 @@
 import Image from "next/image";
 
 import { useWalletStore } from "../context/WalletContext";
-import { motion, AnimatePresence } from "framer-motion";
-import { useWallet } from "../context/WalletContext";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
+import { useWallet } from "../context/WalletContext";
 import { Wallet, Check, AlertCircle } from "lucide-react";
 import React from "react";
 import UserIcon from "./userIcon";
+import { logger } from "../lib/logger";
 
 export function WalletModal() {
   const isModalOpen = useWalletStore((s) => s.isModalOpen);
@@ -41,7 +41,7 @@ export function WalletModal() {
         await connect(activeSelection);
       } catch (err) {
         // Error is handled in context
-        console.error("Connection error:", err);
+        logger.error("Connection error:", err);
       }
     }
   };

@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef } from 'react';
+import { logger } from '../lib/logger';
 
 interface CallGraphVisualizerProps {
   mermaidDefinition: string;
@@ -36,7 +37,7 @@ export function CallGraphVisualizer({ mermaidDefinition }: CallGraphVisualizerPr
             containerRef.current.innerHTML = svg;
           }
         } catch (error) {
-          console.error('Mermaid rendering failed:', error);
+          logger.error('Mermaid rendering failed:', error);
           if (isMounted && containerRef.current) {
             containerRef.current.innerHTML = `<p style="color: #fb8500;">Failed to render call graph: ${String(error)}</p>`;
           }

@@ -1,4 +1,5 @@
 import React from 'react';
+import { logger } from '../lib/logger';
 
 type ErrorBoundaryProps = {
   children: React.ReactNode;
@@ -21,7 +22,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     this.setState({ errorInfo });
-    console.error('Unhandled UI error:', error, errorInfo);
+    logger.error('Unhandled UI error:', error, errorInfo);
   }
 
   reset = () => {
