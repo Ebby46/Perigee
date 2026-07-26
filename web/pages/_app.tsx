@@ -5,10 +5,10 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 
 export default function App({ Component, pageProps }: AppProps) {
   return (
-    <ErrorBoundary>
-      <WalletProvider>
+    <WalletProvider>
+      <ErrorBoundary>
         <Component {...pageProps} />
-      </WalletProvider>
-    </ErrorBoundary>
+      </ErrorBoundary>
+    </WalletProvider>
   );
 }

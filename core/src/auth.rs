@@ -19,15 +19,71 @@ use soroban_sdk::xdr::{
     Preconditions, ReadXdr, SequenceNumber, SignatureHint, TimeBounds, TimePoint, Transaction,
     TransactionEnvelope, TransactionExt, TransactionV1Envelope, Uint256, WriteXdr,
 };
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use stellar_strkey::Strkey;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 const CHALLENGE_EXPIRY_SECS: u64 = 300;
-const JWT_EXPIRY_SECS: u64 = 86400;
+/// Short-lived access JWT lifetime (15 minutes).
+const ACCESS_TOKEN_EXPIRY_SECS: u64 = 900;
+/// Refresh token lifetime (7 days). Rotated on every `/auth/refresh`.
+const REFRESH_TOKEN_EXPIRY_SECS: u64 = 604_800;
 const WEB_AUTH_DOMAIN: &str = "Perigee";
+
+/// Server-side refresh-token record. The raw token is never stored — only its hash.
+#[derive(Clone, Debug)]
+enum RefreshTokenRecord {
+    Active {
+        subject: String,
+        expires_at: u64,
+        /// Shared across a rotation chain so reuse of a retired token can revoke the family.
+        family_id: String,
+    },
+    /// Tombstone left after rotation; presenting this hash revokes the whole family.
+    Rotated {
+        family_id: String,
+        expires_at: u64,
+    },
+const RATE_LIMIT_CAPACITY: f64 = 60.0;
+const RATE_LIMIT_REFILL_RATE: f64 = 1.0; // Refills 1 token per second (60 requests/minute)
+
+#[derive(Debug, Clone)]
+pub struct TokenBucket {
+    tokens: f64,
+    last_update: Instant,
+}
+
+impl TokenBucket {
+    pub fn new(capacity: f64) -> Self {
+        Self {
+            tokens: capacity,
+            last_update: Instant::now(),
+        }
+    }
+
+    pub fn consume(&mut self, capacity: f64, refill_rate: f64, amount: f64) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_update).as_secs_f64();
+        self.last_update = now;
+
+        self.tokens = (self.tokens + elapsed * refill_rate).min(capacity);
+
+        if self.tokens >= amount {
+            self.tokens -= amount;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 pub struct AuthState {
     pub encoding_key: EncodingKey,
@@ -40,6 +96,10 @@ pub struct AuthState {
     /// Emergency pause flag for message verification.
     /// When true, all verification endpoints reject requests.
     pub emergency_verification_paused: Arc<AtomicBool>,
+    /// Hash(refresh_token) → record. Enables rotation and revocation.
+    refresh_tokens: Arc<RwLock<HashMap<String, RefreshTokenRecord>>>,
+    /// Thread-safe map of token buckets keyed by authenticated tenant (Stellar address)
+    pub rate_limiter: Mutex<HashMap<String, TokenBucket>>,
 }
 
 impl AuthState {
@@ -89,6 +149,8 @@ impl AuthState {
             server_public_key,
             network_passphrase,
             emergency_verification_paused: Arc::new(AtomicBool::new(emergency_verification_paused)),
+            refresh_tokens: Arc::new(RwLock::new(HashMap::new())),
+            rate_limiter: Mutex::new(HashMap::new()),
         }
     }
 
@@ -104,6 +166,10 @@ impl AuthState {
     pub fn set_verification_paused(&self, paused: bool) {
         self.emergency_verification_paused
             .store(paused, Ordering::SeqCst);
+    }
+
+    pub fn access_token_ttl_secs(&self) -> u64 {
+        ACCESS_TOKEN_EXPIRY_SECS
     }
 }
 
@@ -126,7 +192,21 @@ pub struct VerifyRequest {
 
 #[derive(Serialize, ToSchema)]
 pub struct VerifyResponse {
+    /// Short-lived access JWT (Bearer). Prefer this over the legacy `token` alias.
+    pub access_token: String,
+    /// Opaque refresh token. Single-use; rotated on every `/auth/refresh`.
+    pub refresh_token: String,
+    /// Access-token lifetime in seconds.
+    pub expires_in: u64,
+    /// Token type for Authorization header (always `Bearer`).
+    pub token_type: String,
+    /// Legacy alias for `access_token` (kept for older clients).
     pub token: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
 }
 
 /// Emergency pause toggle request (admin-only).
@@ -159,6 +239,168 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+fn hash_refresh_token(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    hex::encode(digest)
+}
+
+fn generate_refresh_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    BASE64_URL.encode(bytes)
+}
+
+fn encode_access_token(state: &AuthState, subject: &str) -> Result<String, AppError> {
+    let now = now_secs();
+    let claims = Claims {
+        sub: subject.to_string(),
+        iss: WEB_AUTH_DOMAIN.to_string(),
+        iat: now,
+        exp: now + ACCESS_TOKEN_EXPIRY_SECS,
+        scopes: vec!["simulate".to_string()],
+    };
+
+    let header = Header::new(Algorithm::RS256);
+    encode(&header, &claims, &state.encoding_key)
+        .map_err(|e| AppError::Internal(format!("JWT encode error: {e}")))
+}
+
+/// Issue a short-lived access JWT plus a new refresh token (new rotation family).
+pub(crate) fn issue_token_pair(state: &AuthState, subject: &str) -> Result<VerifyResponse, AppError> {
+    let family_id = Uuid::new_v4().to_string();
+    issue_token_pair_in_family(state, subject, &family_id)
+}
+
+fn issue_token_pair_in_family(
+    state: &AuthState,
+    subject: &str,
+    family_id: &str,
+) -> Result<VerifyResponse, AppError> {
+    let access_token = encode_access_token(state, subject)?;
+    let refresh_token = generate_refresh_token();
+    let token_hash = hash_refresh_token(&refresh_token);
+    let expires_at = now_secs() + REFRESH_TOKEN_EXPIRY_SECS;
+
+    let record = RefreshTokenRecord::Active {
+        subject: subject.to_string(),
+        expires_at,
+        family_id: family_id.to_string(),
+    };
+
+    let mut store = state
+        .refresh_tokens
+        .write()
+        .map_err(|_| AppError::Internal("Refresh token store lock poisoned".into()))?;
+    purge_expired_refresh_tokens(&mut store, now_secs());
+    store.insert(token_hash, record);
+
+    Ok(VerifyResponse {
+        access_token: access_token.clone(),
+        refresh_token,
+        expires_in: ACCESS_TOKEN_EXPIRY_SECS,
+        token_type: "Bearer".to_string(),
+        token: access_token,
+    })
+}
+
+fn purge_expired_refresh_tokens(store: &mut HashMap<String, RefreshTokenRecord>, now: u64) {
+    store.retain(|_, record| match record {
+        RefreshTokenRecord::Active { expires_at, .. }
+        | RefreshTokenRecord::Rotated { expires_at, .. } => *expires_at >= now,
+    });
+}
+
+/// Rotate: consume the presented refresh token and mint a new access + refresh pair.
+/// Reuse of an already-rotated token revokes the entire family (theft detection).
+pub(crate) fn rotate_refresh_token(
+    state: &AuthState,
+    refresh_token: &str,
+) -> Result<VerifyResponse, AppError> {
+    if refresh_token.is_empty() {
+        return Err(AppError::Unauthorized("Missing refresh token".into()));
+    }
+
+    let token_hash = hash_refresh_token(refresh_token);
+    let now = now_secs();
+
+    let (subject, family_id) = {
+        let mut store = state
+            .refresh_tokens
+            .write()
+            .map_err(|_| AppError::Internal("Refresh token store lock poisoned".into()))?;
+
+        purge_expired_refresh_tokens(&mut store, now);
+
+        match store.get(&token_hash).cloned() {
+            Some(RefreshTokenRecord::Active {
+                subject,
+                expires_at,
+                family_id,
+            }) => {
+                if now > expires_at {
+                    store.retain(|_, r| match r {
+                        RefreshTokenRecord::Active { family_id: fid, .. }
+                        | RefreshTokenRecord::Rotated { family_id: fid, .. } => {
+                            fid != &family_id
+                        }
+                    });
+                    return Err(AppError::Unauthorized("Refresh token expired".into()));
+                }
+                // Leave a tombstone so reuse can be detected.
+                store.insert(
+                    token_hash,
+                    RefreshTokenRecord::Rotated {
+                        family_id: family_id.clone(),
+                        expires_at,
+                    },
+                );
+                (subject, family_id)
+            }
+            Some(RefreshTokenRecord::Rotated { family_id, .. }) => {
+                tracing::warn!(
+                    family_id = %family_id,
+                    "Refresh token reuse detected; revoking rotation family"
+                );
+                store.retain(|_, r| match r {
+                    RefreshTokenRecord::Active { family_id: fid, .. }
+                    | RefreshTokenRecord::Rotated { family_id: fid, .. } => fid != &family_id,
+                });
+                return Err(AppError::Unauthorized(
+                    "Refresh token reuse detected; re-authenticate".into(),
+                ));
+            }
+            None => {
+                return Err(AppError::Unauthorized(
+                    "Invalid or already-rotated refresh token".into(),
+                ));
+            }
+        }
+    };
+
+    issue_token_pair_in_family(state, &subject, &family_id)
+}
+
+/// Revoke every refresh token in the same rotation family as `refresh_token`.
+pub(crate) fn revoke_refresh_token(state: &AuthState, refresh_token: &str) -> Result<(), AppError> {
+    let token_hash = hash_refresh_token(refresh_token);
+    let mut store = state
+        .refresh_tokens
+        .write()
+        .map_err(|_| AppError::Internal("Refresh token store lock poisoned".into()))?;
+
+    let family_id = store.get(&token_hash).map(|r| match r {
+        RefreshTokenRecord::Active { family_id, .. }
+        | RefreshTokenRecord::Rotated { family_id, .. } => family_id.clone(),
+    });
+    if let Some(family_id) = family_id {
+        store.retain(|_, r| match r {
+            RefreshTokenRecord::Active { family_id: fid, .. }
+            | RefreshTokenRecord::Rotated { family_id: fid, .. } => fid != &family_id,
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn network_id(passphrase: &str) -> [u8; 32] {
@@ -368,17 +610,7 @@ pub(crate) fn verify_challenge_envelope(state: &AuthState, signed_xdr_b64: &str)
     let client_address =
         Strkey::PublicKeyEd25519(stellar_strkey::ed25519::PublicKey(client_key)).to_string();
 
-    let claims = Claims {
-        sub: client_address,
-        iss: WEB_AUTH_DOMAIN.to_string(),
-        iat: now,
-        exp: now + JWT_EXPIRY_SECS,
-        scopes: vec!["simulate".to_string()],
-    };
-
-    let header = Header::new(Algorithm::RS256);
-    encode(&header, &claims, &state.encoding_key)
-        .map_err(|e| AppError::Internal(format!("JWT encode error: {e}")))
+    Ok(client_address)
 }
 
 #[utoipa::path(
@@ -423,7 +655,7 @@ pub async fn challenge_handler(
     path = "/auth/verify",
     request_body = VerifyRequest,
     responses(
-        (status = 200, description = "JWT token issued", body = VerifyResponse),
+        (status = 200, description = "Short-lived access JWT and refresh token issued", body = VerifyResponse),
         (status = 401, description = "Authentication failed"),
         (status = 503, description = "Verification paused for emergency maintenance")
     ),
@@ -439,8 +671,63 @@ pub async fn verify_handler(
         ));
     }
 
-    let token = verify_challenge_envelope(&state, &payload.transaction)?;
-    Ok(Json(VerifyResponse { token }))
+    let subject = verify_challenge_envelope(&state, &payload.transaction)?;
+    let tokens = issue_token_pair(&state, &subject)?;
+    Ok(Json(tokens))
+}
+
+#[utoipa::path(
+    post,
+    path = "/auth/refresh",
+    request_body = RefreshRequest,
+    responses(
+        (status = 200, description = "Rotated access and refresh tokens", body = VerifyResponse),
+        (status = 401, description = "Invalid, expired, or reused refresh token"),
+        (status = 503, description = "Verification paused for emergency maintenance")
+    ),
+    tag = "Auth"
+)]
+pub async fn refresh_handler(
+    Extension(state): Extension<Arc<AuthState>>,
+    Json(payload): Json<RefreshRequest>,
+) -> Result<Json<VerifyResponse>, AppError> {
+    if state.is_verification_paused() {
+        return Err(AppError::Internal(
+            "Authentication is temporarily paused for emergency maintenance".into(),
+        ));
+    }
+
+    let tokens = rotate_refresh_token(&state, &payload.refresh_token)?;
+    Ok(Json(tokens))
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct RevokeResponse {
+    pub revoked: bool,
+}
+
+#[utoipa::path(
+    post,
+    path = "/auth/revoke",
+    request_body = RefreshRequest,
+    responses(
+        (status = 200, description = "Refresh token family revoked", body = RevokeResponse),
+        (status = 503, description = "Verification paused for emergency maintenance")
+    ),
+    tag = "Auth"
+)]
+pub async fn revoke_handler(
+    Extension(state): Extension<Arc<AuthState>>,
+    Json(payload): Json<RefreshRequest>,
+) -> Result<Json<RevokeResponse>, AppError> {
+    if state.is_verification_paused() {
+        return Err(AppError::Internal(
+            "Authentication is temporarily paused for emergency maintenance".into(),
+        ));
+    }
+
+    revoke_refresh_token(&state, &payload.refresh_token)?;
+    Ok(Json(RevokeResponse { revoked: true }))
 }
 
 /// Emergency pause toggle endpoint (for administrative control).
@@ -505,6 +792,22 @@ pub async fn auth_middleware(
         ));
     }
 
+    // Rate limiting per manager/tenant (Stellar address)
+    let tenant = token_data.claims.sub.clone();
+    {
+        let mut rate_limiter = state.rate_limiter.lock().unwrap();
+        let bucket = rate_limiter
+            .entry(tenant.clone())
+            .or_insert_with(|| TokenBucket::new(RATE_LIMIT_CAPACITY));
+
+        if !bucket.consume(RATE_LIMIT_CAPACITY, RATE_LIMIT_REFILL_RATE, 1.0) {
+            return Err(AppError::TooManyRequests(format!(
+                "Rate limit exceeded for tenant {}",
+                tenant
+            )));
+        }
+    }
+
     Ok(next.run(req).await)
 }
 
@@ -553,51 +856,23 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
-    #[test]
-    fn test_auth_state_new() {
-        let state = AuthState::new(
+    fn test_state() -> AuthState {
+        AuthState::new(
             None,
             Some([1u8; 32]),
             "Test SDF Network ; September 2015".to_string(),
             false,
-        );
-        assert!(!state.is_verification_paused());
+        )
     }
 
-    #[test]
-    fn test_emergency_pause() {
-        let state = AuthState::new(
-            None,
-            Some([1u8; 32]),
-            "Test SDF Network ; September 2015".to_string(),
-            false,
-        );
-        assert!(!state.is_verification_paused());
-        state.set_verification_paused(true);
-        assert!(state.is_verification_paused());
-        state.set_verification_paused(false);
-        assert!(!state.is_verification_paused());
-    }
-
-    #[test]
-    fn test_challenge_and_verify() {
-        // Create test state
-        let state = AuthState::new(
-            None,
-            Some([1u8; 32]),
-            "Test SDF Network ; September 2015".to_string(),
-            false,
-        );
-
-        // Create test client key
+    fn signed_challenge(state: &AuthState) -> (String, String) {
         let mut rng = OsRng;
         let client_signing_key = SigningKey::generate(&mut rng);
         let client_verifying_key = client_signing_key.verifying_key();
 
-        // Get challenge
-        let challenge_xdr = build_challenge_envelope(&state, &client_verifying_key.to_bytes()).unwrap();
+        let challenge_xdr =
+            build_challenge_envelope(state, &client_verifying_key.to_bytes()).unwrap();
 
-        // Decode and sign challenge
         let raw = BASE64.decode(&challenge_xdr).unwrap();
         let mut envelope = TransactionEnvelope::from_xdr(&raw, Limits::none()).unwrap();
         let TransactionEnvelope::Tx(ref mut inner) = envelope else {
@@ -611,33 +886,114 @@ mod tests {
             hint: SignatureHint(client_hint),
             signature: client_sig.to_bytes().to_vec().try_into().unwrap(),
         };
-        inner.signatures.push(decorated).unwrap();
+        let mut sigs: Vec<_> = inner.signatures.iter().cloned().collect();
+        sigs.push(decorated);
+        inner.signatures = sigs.try_into().unwrap();
 
-        // Encode back
         let signed_xdr = BASE64.encode(&envelope.to_xdr(Limits::none()).unwrap());
+        let expected_sub = Strkey::PublicKeyEd25519(stellar_strkey::ed25519::PublicKey(
+            client_verifying_key.to_bytes(),
+        ))
+        .to_string();
+        (signed_xdr, expected_sub)
+    }
 
-        // Verify and get JWT
-        let jwt = verify_challenge_envelope(&state, &signed_xdr).unwrap();
-        assert!(!jwt.is_empty());
+    #[test]
+    fn test_auth_state_new() {
+        let state = test_state();
+        assert!(!state.is_verification_paused());
+    }
 
-        // Validate JWT
+    #[test]
+    fn test_emergency_pause() {
+        let state = test_state();
+        assert!(!state.is_verification_paused());
+        state.set_verification_paused(true);
+        assert!(state.is_verification_paused());
+        state.set_verification_paused(false);
+        assert!(!state.is_verification_paused());
+    }
+
+    #[test]
+    fn test_challenge_and_verify() {
+        let state = test_state();
+        let (signed_xdr, expected_sub) = signed_challenge(&state);
+
+        let subject = verify_challenge_envelope(&state, &signed_xdr).unwrap();
+        assert_eq!(subject, expected_sub);
+
+        let tokens = issue_token_pair(&state, &subject).unwrap();
+        assert!(!tokens.access_token.is_empty());
+        assert!(!tokens.refresh_token.is_empty());
+        assert_eq!(tokens.expires_in, ACCESS_TOKEN_EXPIRY_SECS);
+        assert_eq!(tokens.token_type, "Bearer");
+        assert_eq!(tokens.token, tokens.access_token);
+
         let validation = Validation::new(Algorithm::RS256);
-        let token_data = decode::<Claims>(&jwt, &state.decoding_key, &validation).unwrap();
-        let expected_sub = Strkey::PublicKeyEd25519(stellar_strkey::ed25519::PublicKey(client_verifying_key.to_bytes())).to_string();
+        let token_data =
+            decode::<Claims>(&tokens.access_token, &state.decoding_key, &validation).unwrap();
         assert_eq!(token_data.claims.sub, expected_sub);
         assert_eq!(token_data.claims.iss, WEB_AUTH_DOMAIN.to_string());
         assert!(token_data.claims.scopes.contains(&"simulate".to_string()));
+
+        let now = now_secs();
+        assert!(token_data.claims.exp <= now + ACCESS_TOKEN_EXPIRY_SECS);
+        assert!(token_data.claims.exp > now);
+        // Access tokens must be short-lived (well under the old 24h window).
+        assert!(token_data.claims.exp - token_data.claims.iat <= ACCESS_TOKEN_EXPIRY_SECS);
+        assert!(ACCESS_TOKEN_EXPIRY_SECS < 3600);
+    }
+
+    #[test]
+    fn test_refresh_rotates_tokens() {
+        let state = test_state();
+        let first = issue_token_pair(&state, "GTESTSUBJECT").unwrap();
+
+        let second = rotate_refresh_token(&state, &first.refresh_token).unwrap();
+        // Refresh token must always rotate; access JWT may be identical if minted
+        // in the same second with identical claims.
+        assert_ne!(first.refresh_token, second.refresh_token);
+        assert_eq!(second.expires_in, ACCESS_TOKEN_EXPIRY_SECS);
+        assert!(!second.access_token.is_empty());
+
+        // Old refresh token must be rejected after rotation.
+        let reuse = rotate_refresh_token(&state, &first.refresh_token);
+        assert!(reuse.is_err());
+
+        // Family revoked after reuse — new refresh also dies.
+        let after_reuse = rotate_refresh_token(&state, &second.refresh_token);
+        assert!(after_reuse.is_err());
+    }
+
+    #[test]
+    fn test_refresh_invalid_token() {
+        let state = test_state();
+        let err = rotate_refresh_token(&state, "not-a-real-token");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_revoke_refresh_token() {
+        let state = test_state();
+        let tokens = issue_token_pair(&state, "GTESTSUBJECT").unwrap();
+        revoke_refresh_token(&state, &tokens.refresh_token).unwrap();
+        assert!(rotate_refresh_token(&state, &tokens.refresh_token).is_err());
+    }
+
+    #[test]
+    fn test_access_token_expiry_claim_is_short() {
+        let state = test_state();
+        let jwt = encode_access_token(&state, "GTEST").unwrap();
+        let validation = Validation::new(Algorithm::RS256);
+        let claims = decode::<Claims>(&jwt, &state.decoding_key, &validation)
+            .unwrap()
+            .claims;
+        assert_eq!(claims.exp - claims.iat, ACCESS_TOKEN_EXPIRY_SECS);
     }
 
     #[test]
     fn test_jwks() {
-        let state = AuthState::new(
-            None,
-            Some([1u8; 32]),
-            "Test SDF Network ; September 2015".to_string(),
-            false,
-        );
-        // Just check that we can create a jwk response (we don't need to test the handler, just the structure)
+        let state = test_state();
         let _ = JwkResponse {
             kty: "RSA".to_string(),
             alg: "RS256".to_string(),
@@ -646,5 +1002,13 @@ mod tests {
             e: state.jwk_e.clone(),
             use_: "sig".to_string(),
         };
+    }
+
+    #[test]
+    fn test_token_bucket_rate_limiter() {
+        let mut bucket = TokenBucket::new(2.0);
+        assert!(bucket.consume(2.0, 1.0, 1.0));
+        assert!(bucket.consume(2.0, 1.0, 1.0));
+        assert!(!bucket.consume(2.0, 1.0, 1.0));
     }
 }

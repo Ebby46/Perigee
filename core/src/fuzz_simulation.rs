@@ -9,6 +9,7 @@
 #[cfg(test)]
 mod tests {
     use crate::cache::SimulationCache;
+    use crate::config::TESTNET_DEFAULT_CONTRACT_ID;
     use crate::simulation::{
         CallGraph, CallNode, SimulationEngine, SimulationResult, SimulationStateSnapshot,
         SorobanResources, TtlEntryReport,
@@ -179,7 +180,7 @@ mod tests {
         ) {
             let engine = SimulationEngine::new("https://test.com".into());
             let result = engine.parse_contract_id(
-                "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+                TESTNET_DEFAULT_CONTRACT_ID,
             );
             prop_assert!(result.is_ok());
             prop_assert_eq!(result.unwrap().len(), 32);
@@ -205,7 +206,7 @@ mod tests {
         ) {
             let engine = SimulationEngine::new("https://test.com".into());
             let result = engine.create_invoke_transaction(
-                "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+                TESTNET_DEFAULT_CONTRACT_ID,
                 &func,
                 vec![],
             );
@@ -225,7 +226,7 @@ mod tests {
                 .map(|i| if i % 2 == 0 { "true".into() } else { "42".into() })
                 .collect();
             let _ = engine.create_invoke_transaction(
-                "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+                TESTNET_DEFAULT_CONTRACT_ID,
                 &func,
                 args,
             );

@@ -364,6 +364,7 @@ fn test_verify_signed_message_success_ed25519() {
         signature: BytesN::from_array(&env, &signature.to_bytes()),
         signer_public_key: BytesN::from_array(&env, &verifying_key.to_bytes()),
         algorithm: SignatureAlgorithm::Ed25519,
+        revocation_nonce: 0,
     };
 
     let sibling1 = BytesN::from_array(&env, &[3; 32]);
@@ -456,6 +457,7 @@ fn test_verify_signed_message_accepts_valid_signature() {
         signature: BytesN::from_array(&env, &signature.to_bytes()),
         signer_public_key: BytesN::from_array(&env, &verifying_key.to_bytes()),
         algorithm: SignatureAlgorithm::Ed25519,
+        revocation_nonce: 0,
     };
 
     let leaf = BytesN::from_array(&env, &message_hash.to_array());
@@ -522,6 +524,7 @@ fn test_verify_signed_message_with_invalid_signer() {
         signature,
         signer_public_key: unauthorized_public_key,
         algorithm: SignatureAlgorithm::Ed25519,
+        revocation_nonce: 0,
     };
 
     // Create Merkle proof
@@ -780,6 +783,7 @@ fn test_verify_signed_message_panics_when_paused() {
         signature: BytesN::from_array(&env, &signature.to_bytes()),
         signer_public_key: BytesN::from_array(&env, &verifying_key.to_bytes()),
         algorithm: SignatureAlgorithm::Ed25519,
+        revocation_nonce: 0,
     };
 
     let proof = soroban_sdk::Vec::new(&env);
@@ -899,4 +903,98 @@ fn test_replay_on_nonce_zero_panics() {
 
     client.verify_message_and_consume(&block_height, &0u64, &leaf, &proof, &proof_flags);
     client.verify_message_and_consume(&block_height, &0u64, &leaf, &proof, &proof_flags);
+}
+
+#[test]
+fn test_revocation_nonce_prevents_stale_signatures() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, CrossChainVerifier);
+    let client = CrossChainVerifierClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    // Add a signer
+    let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+    let verifying_key = signing_key.verifying_key();
+    let public_key = Bytes::from_slice(&env, &verifying_key.to_bytes());
+    client.add_authorized_signer(&public_key, &SignatureAlgorithm::Ed25519);
+
+    // Create a signed message with nonce 0 (before revocation)
+    let message = CrossChainMessage {
+        source_chain: 1,
+        destination_chain: 2,
+        nonce: 1,
+        payload: Bytes::from_slice(&env, b"test payload"),
+        timestamp: 1000,
+    };
+
+    let message_hash: BytesN<32> = {
+        let mut data = Bytes::new(&env);
+        data.append(&Bytes::from_slice(&env, b"CROSS_CHAIN_MESSAGE_V1"));
+        data.append(&Bytes::from_slice(&env, &message.source_chain.to_be_bytes()));
+        data.append(&Bytes::from_slice(&env, &message.destination_chain.to_be_bytes()));
+        data.append(&Bytes::from_slice(&env, &message.nonce.to_be_bytes()));
+        data.append(&Bytes::from_slice(&env, &message.timestamp.to_be_bytes()));
+        let payload_hash = env.crypto().sha256(&message.payload).to_array();
+        data.append(&Bytes::from_slice(&env, &payload_hash));
+        BytesN::from_array(&env, &env.crypto().sha256(&data).to_array())
+    };
+
+    let signature = signing_key.sign(&message_hash.to_array());
+
+    let signed_message = SignedMessage {
+        message,
+        signature: BytesN::from_array(&env, &signature.to_bytes()),
+        signer_public_key: BytesN::from_array(&env, &verifying_key.to_bytes()),
+        algorithm: SignatureAlgorithm::Ed25519,
+        revocation_nonce: 0, // Old nonce before revocation
+    };
+
+    // Set up Merkle proof
+    let leaf = BytesN::from_array(&env, &message_hash.to_array());
+    let sibling1 = BytesN::from_array(&env, &[3; 32]);
+    let sibling2 = BytesN::from_array(&env, &[4; 32]);
+
+    let mut combined_1 = [0u8; 64];
+    combined_1[0..32].copy_from_slice(&sibling1.to_array());
+    combined_1[32..64].copy_from_slice(&leaf.to_array());
+    let hash_1 = env
+        .crypto()
+        .sha256(&Bytes::from_slice(&env, &combined_1))
+        .to_array();
+
+    let mut combined_2 = [0u8; 64];
+    combined_2[0..32].copy_from_slice(&hash_1);
+    combined_2[32..64].copy_from_slice(&sibling2.to_array());
+    let final_root = env
+        .crypto()
+        .sha256(&Bytes::from_slice(&env, &combined_2))
+        .to_array();
+
+    let expected_root = BytesN::from_array(&env, &final_root);
+    let block_height = 100;
+    client.update_root(&block_height, &expected_root);
+
+    let mut proof = Vec::new(&env);
+    proof.push_back(sibling1);
+    proof.push_back(sibling2);
+
+    let mut proof_flags = Vec::new(&env);
+    proof_flags.push_back(true);
+    proof_flags.push_back(false);
+
+    // Verification should succeed before revocation
+    assert!(client.verify_signed_message(&signed_message, &block_height, &proof, &proof_flags));
+
+    // Revoke the signer (this increments the revocation nonce)
+    client.remove_authorized_signer(&public_key);
+
+    // Re-add the same signer (nonce is now 1)
+    client.add_authorized_signer(&public_key, &SignatureAlgorithm::Ed25519);
+
+    // The old signature with nonce 0 should now fail verification
+    let result = client.verify_signed_message(&signed_message, &block_height, &proof, &proof_flags);
+    assert!(!result, "Old signature with stale nonce should be rejected after revocation");
 }

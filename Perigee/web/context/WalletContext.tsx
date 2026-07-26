@@ -1,6 +1,7 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useState } from "react";
+import { logger } from "../lib/logger";
 
 interface WalletContextType {
   connect: (moduleId: string) => Promise<void>;
@@ -54,7 +55,7 @@ export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
           setSelectedWalletId(savedWalletId);
         }
       } catch (err) {
-        console.error("Failed to initialize wallet kit:", err);
+        logger.error("Failed to initialize wallet kit:", err);
         setError("Failed to load wallet kit");
       }
     };
@@ -91,7 +92,7 @@ export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
     } catch (err: any) {
       const errorMessage = err?.message || "Connection failed";
       setError(errorMessage);
-      console.error("Wallet connection failed:", err);
+      logger.error("Wallet connection failed:", err);
     } finally {
       setIsConnecting(false);
     }
@@ -101,9 +102,9 @@ export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
     if (kit) {
       try {
         await kit.disconnect();
-      } catch (err) {
-        console.error("Disconnect error:", err);
-      }
+} catch (err) {
+      logger.error("Disconnect error:", err);
+    }
     }
     setAddress(null);
     setSelectedWalletId(null);
