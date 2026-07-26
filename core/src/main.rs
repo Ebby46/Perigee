@@ -1571,6 +1571,23 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
+async fn ready_check(State(state): State<Arc<AppState>>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    
+    let db_ok = sqlx::query("SELECT 1")
+        .execute(&state.reconciler_pool)
+        .await
+        .is_ok();
+        
+    let rpc_ok = !state.provider_registry.healthy_providers().await.is_empty();
+
+    if db_ok && rpc_ok {
+        (axum::http::StatusCode::OK, "OK").into_response()
+    } else {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable").into_response()
+    }
+}
+
 async fn registry_providers(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<crate::rpc_provider::ProviderHealthReport>> {
@@ -2143,6 +2160,7 @@ async fn main() {
             }),
         )
         .route("/health", get(health_check))
+        .route("/ready", get(ready_check))
         .route("/metrics", get(metrics_handler))
         .route("/auth/challenge", post(auth::challenge_handler))
         .route("/auth/verify", post(auth::verify_handler))
