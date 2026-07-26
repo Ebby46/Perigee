@@ -26,6 +26,9 @@ pub enum AppError {
 
     #[error("Too many requests: {0}")]
     TooManyRequests(String),
+
+    #[error("Conflict: {0}")]
+    Conflict(String),
 }
 
 #[derive(Serialize, ToSchema)]
@@ -44,6 +47,7 @@ impl AppError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::Conflict(_) => StatusCode::CONFLICT,
         }
     }
 
@@ -54,6 +58,7 @@ impl AppError {
             Self::BadRequest(_) => "BAD_REQUEST",
             Self::Unauthorized(_) => "UNAUTHORIZED",
             Self::TooManyRequests(_) => "TOO_MANY_REQUESTS",
+            Self::Conflict(_) => "CONFLICT",
         }
     }
 }
