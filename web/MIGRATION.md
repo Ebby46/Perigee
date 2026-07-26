@@ -34,44 +34,98 @@ Next.js 16 ships with App Router as the default. Continuing with Pages Router wi
 - [x] Create `app/page.tsx` placeholder
 - [x] Document migration plan in `MIGRATION.md`
 - [x] Update `next.config.js` with migration status comments
+- [x] Update `next.config.js` with experimental configuration section
 
 ## Phase 2 — Simple Pages (No Data Fetching)
 
 Migrate pages with no `getServerSideProps` or `getStaticProps`:
 
-- [ ] **pages/index.tsx** → `app/page.tsx`
-  - Uses `useState`, `useEffect`, and client-side API calls
-  - Uses `next/head` for metadata — convert to `metadata` export in `app/layout.tsx`
-  - Wrapped in `WalletProvider` and `ErrorBoundary` in `_app.tsx`
-  - **Steps**:
-    1. Copy content from `pages/index.tsx` to `app/page.tsx`
-    2. Remove `Head` import and `<Head>` component usage
-    3. Add metadata to `app/layout.tsx` (already templated)
-    4. Test in dev environment
-    5. Delete `pages/index.tsx` only after confirmed working
+### pages/index.tsx → app/page.tsx
+
+**Current State**:
+- Uses `useState`, `useEffect`, and client-side API calls
+- Uses `next/head` for metadata — convert to `metadata` export in `app/layout.tsx`
+- Wrapped in `WalletProvider` and `ErrorBoundary` in `_app.tsx`
+- No server-side data fetching
+
+**Migration Steps**:
+1. Copy content from `pages/index.tsx` to `app/page.tsx`
+2. Add `"use client"` directive at top of file (needs interactivity)
+3. Remove `Head` import and `<Head>` component usage
+4. Verify metadata is set in `app/layout.tsx` (already templated)
+5. Test in dev environment (wallet connection, contract analysis)
+6. Delete `pages/index.tsx` only after confirmed working
+
+**Status**: ⏳ Pending
 
 ## Phase 3 — Providers & Layout
 
 Convert `pages/_app.tsx` providers to `app/layout.tsx`:
 
-- [ ] **Move global CSS**
-  - Move `import '../styles/globals.css'` from `pages/_app.tsx` to `app/layout.tsx`
-- [ ] **Move ErrorBoundary**
-  - `ErrorBoundary` (class component) → needs conversion to error boundary pattern
-  - Option A: Use `error.tsx` file (App Router native)
-  - Option B: Keep as wrapper component in layout if simpler
-- [ ] **Move WalletProvider**
-  - Already has `"use client"` directive (future-proof)
-  - Wrap `{children}` with `<WalletProvider>` in layout
-- [ ] **Remove pages/_app.tsx**
-  - Delete after all providers migrated to layout
+### Move Global CSS
+
+- [ ] Move `import '../styles/globals.css'` from `pages/_app.tsx` to `app/layout.tsx`
+
+### Move ErrorBoundary
+
+**Current Implementation**: Class component (`ErrorBoundary.tsx`)
+- Catches render errors with custom error UI
+- Shows error message, component stack (dev only), retry + reload buttons
+
+**Migration Options**:
+- **Option A**: Use App Router `error.tsx` file (native error boundary)
+- **Option B**: Keep class component as wrapper if simpler
+
+**Recommended**: Option A (native) for consistency with App Router patterns
+
+### Move WalletProvider
+
+**Current Implementation**: Already has `"use client"` directive (future-proof!)
+- Handles Stellar wallet connection/disconnection
+- Uses Zustand-like store pattern
+- Persists to localStorage + sessionStorage
+- Supports multiple wallet modules (Freighter, Albedo, xBull, Rabet, Lobstr)
+
+**Migration Steps**:
+- Wrap `{children}` with `<WalletProvider>` in `app/layout.tsx`
+- Add `"use client"` directive to layout (if needed for providers)
+- No code changes required to WalletProvider itself
+
+### Cleanup
+
+- [ ] Delete `pages/_app.tsx` after all providers migrated
+
+**Status**: ⏳ Pending
 
 ## Phase 4 — Cleanup
 
 - [ ] Delete `pages/` directory (only after all routes migrated)
 - [ ] Remove `useFileSystemPublicRoutes: true` from `next.config.js`
 - [ ] Update Next.js to latest version
-- [ ] Remove this `MIGRATION.md` file or update to "Completed"
+- [ ] Remove or archive `MIGRATION.md` file
+
+**Status**: ⏳ Pending
+
+## Phase 5 — API Routes (N/A)
+
+**Status**: ✅ Not applicable — No API routes to migrate
+
+**Reason**: All backend calls go to external services. No `pages/api/` routes in this project.
+
+This phase would normally handle converting `pages/api/X.ts` to `app/api/X/route.ts`, but since there are no API routes, this phase is skipped.
+
+## Phase 6 — Final Verification
+
+After Phase 4 cleanup, verify:
+
+- [ ] Run full test suite: `npm test`
+- [ ] Build production bundle: `npm run build`
+- [ ] Check for console warnings or errors
+- [ ] Test all user-facing features (wallet, contract analysis, WASM upload)
+- [ ] Verify deployment works as expected
+- [ ] Monitor error logs for any App Router-specific issues
+
+**Status**: ⏳ Pending
 
 ## Key Differences to Handle
 
@@ -85,8 +139,8 @@ export default function Page() {
   return (
     <>
       <Head>
-        <title>My Page</title>
-        <meta name="description" content="..." />
+        <title>Perigee - Soroban Smart Contract Resource Analyzer</title>
+        <meta name="description" content="Explore, test, and analyze..." />
       </Head>
       <div>Content</div>
     </>
@@ -95,32 +149,12 @@ export default function Page() {
 
 // AFTER (App Router)
 export const metadata = {
-  title: 'My Page',
-  description: '...',
+  title: 'Perigee - Soroban Smart Contract Resource Analyzer',
+  description: 'Explore, test, and analyze...',
 };
 
 export default function Page() {
   return <div>Content</div>;
-}
-```
-
-### Data Fetching: `getServerSideProps` → async components
-
-```typescript
-// BEFORE (Pages Router)
-export async function getServerSideProps() {
-  const data = await fetchData();
-  return { props: { data } };
-}
-
-export default function Page({ data }) {
-  return <div>{data}</div>;
-}
-
-// AFTER (App Router)
-export default async function Page() {
-  const data = await fetchData();
-  return <div>{data}</div>;
 }
 ```
 
@@ -146,52 +180,65 @@ export default function Page() {
 }
 ```
 
-### API Routes: `pages/api/` → `app/api/` with Route Handlers
-
-```typescript
-// BEFORE: pages/api/users.ts
-export default function handler(req, res) {
-  if (req.method === 'GET') {
-    res.json({ users: [] });
-  }
-}
-
-// AFTER: app/api/users/route.ts
-export async function GET() {
-  return Response.json({ users: [] });
-}
-```
-
 ## Pages Inventory
 
-All pages currently in the project (from Part 1 analysis):
+All pages currently in the project:
 
 | Page | File | Data Fetching | Complexity | Status |
 |------|------|---------------|-----------|--------|
-| Home | `pages/index.tsx` | Client-side API calls | Low | Pending |
+| Home | `pages/index.tsx` | Client-side API calls only | Low | ⏳ Pending |
 
-**Total: 1 page** — Simple migration, no API routes to migrate.
+**Total: 1 page** — Simple migration, no complex data fetching.
+
+## API Routes Inventory
+
+| Route | Method | Status |
+|-------|--------|--------|
+| None | — | ✅ N/A (all calls to external service) |
+
+**Total: 0 API routes** — No backend routes to migrate.
 
 ## Providers & Context Used
 
 The project uses these providers in `pages/_app.tsx`:
 
-1. **ErrorBoundary** — Class component that catches render errors
-   - Currently wraps entire app
-   - Must be converted to App Router error handling (error.tsx)
-   - Already has custom fallback UI
+### 1. ErrorBoundary
 
-2. **WalletProvider** — Custom context for Stellar wallet connection
-   - Uses Zustand-like store pattern
-   - Already has `"use client"` directive (future-proof)
-   - Handles wallet kit initialization and persistence
-   - No API data fetching — safe to move as-is
+- **Type**: Class component (React.Component)
+- **Purpose**: Catches render errors and displays error UI
+- **Current location**: `components/ErrorBoundary.tsx`
+- **Features**:
+  - Custom error display with red styling
+  - Shows error message and component stack (dev only)
+  - Retry button + reload button
+- **Migration**: Convert to App Router error boundary (`error.tsx`)
+
+### 2. WalletProvider
+
+- **Type**: Custom context (already has `"use client"` directive!)
+- **Location**: `context/WalletContext.tsx`
+- **Purpose**: Stellar wallet connection management
+- **Features**:
+  - Zustand-like store pattern for state
+  - Supports multiple wallet modules
+  - Persists to localStorage + sessionStorage
+  - Auto-reconnect on page load
+- **Migration**: Wrap in `app/layout.tsx` (no code changes needed)
 
 ## Global Resources
 
 - **CSS**: `styles/globals.css` (Tailwind imports + custom body styles)
 - **Config**: `next.config.js`, `tsconfig.json`, `tailwind.config.js`
 - **Environment**: `.env.example` (one var: `NEXT_PUBLIC_API_URL`)
+- **Middleware**: `middleware.ts` (security headers — compatible with both routers)
+
+## TypeScript & Build Configuration
+
+**tsconfig.json**:
+- ✅ `strict: true` — Strict type checking
+- ✅ `moduleResolution: "bundler"` — App Router compatible
+- ✅ `jsx: "react-jsx"` — React 19 compatible
+- ❌ **No path aliases** — Uses relative imports (could add `@/*` pattern if desired)
 
 ## Migration Checklist
 
@@ -200,22 +247,29 @@ The project uses these providers in `pages/_app.tsx`:
 - [ ] Read this file completely
 - [ ] Understand the differences between Pages Router and App Router
 - [ ] Have a test environment ready
+- [ ] Ensure all current tests pass
 
 ### Phase 2 Checklist (Simple Pages)
 
 - [ ] Backup current code or create a migration branch
 - [ ] Copy `pages/index.tsx` to `app/page.tsx`
-- [ ] Remove `next/head` usage
+- [ ] Add `"use client"` directive to `app/page.tsx`
+- [ ] Remove `next/head` usage (replace with metadata export)
 - [ ] Test the app in dev environment
 - [ ] Verify wallet connection still works
 - [ ] Verify contract analysis features work
+- [ ] Verify WASM upload feature works
 - [ ] Commit changes with message: "chore: migrate pages/index.tsx to app/page.tsx"
+- [ ] Delete `pages/index.tsx`
 
 ### Phase 3 Checklist (Providers)
 
 - [ ] Move `ErrorBoundary` and `WalletProvider` setup to `app/layout.tsx`
 - [ ] Import global CSS in layout
+- [ ] Add `"use client"` directive to layout if needed
 - [ ] Test all functionality in dev environment
+- [ ] Test wallet connection
+- [ ] Test error boundaries
 - [ ] Delete `pages/_app.tsx`
 - [ ] Commit changes with message: "chore: migrate _app.tsx providers to app/layout.tsx"
 
@@ -223,6 +277,7 @@ The project uses these providers in `pages/_app.tsx`:
 
 - [ ] Delete `pages/` directory
 - [ ] Remove `useFileSystemPublicRoutes: true` from `next.config.js`
+- [ ] Remove experimental configuration section from `next.config.js`
 - [ ] Run `npm run build` to verify production build
 - [ ] Update Next.js to latest version (if desired)
 - [ ] Commit changes with message: "chore: complete App Router migration"
@@ -238,7 +293,8 @@ npm run dev
 # Check for errors in console
 # Test wallet connection (if applicable)
 # Test contract analysis features
-# Test page navigation
+# Test WASM upload
+# Test page metadata loads correctly
 
 # Production build
 npm run build
@@ -268,17 +324,23 @@ git reset --hard <commit-before-migration>
 
 ## Questions & Notes
 
-- **Q: Can I use both pages/ and app/ at the same time?**
-  - **A**: Yes! Next.js prioritizes `app/` routes over `pages/` routes when both exist. This enables incremental migration.
+**Q: Can I use both pages/ and app/ at the same time?**
+- A: Yes! Next.js prioritizes `app/` routes over `pages/` routes when both exist. This enables incremental migration.
 
-- **Q: Will my middleware.ts still work?**
-  - **A**: Yes! `middleware.ts` in the root works with both Pages Router and App Router.
+**Q: Will my middleware.ts still work?**
+- A: Yes! `middleware.ts` in the root works with both Pages Router and App Router.
 
-- **Q: Do I need to convert the Stellar wallet kit to Server Components?**
-  - **A**: No. The `WalletProvider` is already marked `"use client"` and works fine in App Router layouts.
+**Q: Do I need to convert the Stellar wallet kit to Server Components?**
+- A: No. The `WalletProvider` is already marked `"use client"` and works fine in App Router layouts.
 
-- **Q: What about TypeScript path aliases?**
-  - **A**: The project currently uses relative imports (no aliases). This doesn't change during migration, but aliases can be added to `tsconfig.json` if desired: `"@/*": ["./*"]`
+**Q: What about TypeScript path aliases?**
+- A: The project currently uses relative imports (no aliases). This doesn't change during migration, but aliases can be added to `tsconfig.json` if desired: `"@/*": ["./*"]`
+
+**Q: How long should Phase 2 take?**
+- A: With only 1 page to migrate, Phase 2 should take 30 minutes to 1 hour (copy, test, verify).
+
+**Q: Should I update Next.js to a newer version after migration?**
+- A: It's safe to update after Phase 4 cleanup. The migration itself uses 16.1.6, which is stable and compatible with the incremental approach.
 
 ---
 

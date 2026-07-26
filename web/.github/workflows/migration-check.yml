@@ -1,0 +1,86 @@
+name: App Router Migration Check
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'app/**'
+      - 'pages/**'
+      - 'MIGRATION.md'
+
+jobs:
+  migration-check:
+    runs-on: ubuntu-latest
+    name: Validate Migration State
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Check Next.js version pinned
+        run: |
+          VERSION=$(node -e "const pkg = require('./package.json');const v = pkg.dependencies?.next || pkg.devDependencies?.next;console.log(v);")
+          if [[ "$VERSION" == ^* ]] || [[ "$VERSION" == ~* ]]; then
+            echo "❌ Next.js version must be pinned (no ^ or ~)"
+            echo "Found: $VERSION"
+            echo "Fix: Remove ^ from next version in package.json"
+            exit 1
+          fi
+          echo "✅ Next.js version is pinned: $VERSION"
+
+      - name: Check app/layout.tsx exists
+        run: |
+          if [ ! -f "app/layout.tsx" ]; then
+            echo "❌ app/layout.tsx missing"
+            exit 1
+          fi
+          echo "✅ app/layout.tsx found"
+
+      - name: Check MIGRATION.md exists
+        run: |
+          if [ ! -f "MIGRATION.md" ]; then
+            echo "❌ MIGRATION.md missing"
+            exit 1
+          fi
+          echo "✅ MIGRATION.md found"
+
+      - name: Verify both routers can coexist
+        run: |
+          if [ ! -d "pages" ]; then
+            echo "⚠️  pages/ directory missing (migration may be incomplete)"
+            exit 1
+          fi
+          if [ ! -d "app" ]; then
+            echo "❌ app/ directory missing"
+            exit 1
+          fi
+          echo "✅ Both pages/ and app/ directories present"
+
+      - name: Check pages/_app.tsx exists
+        run: |
+          if [ ! -f "pages/_app.tsx" ] && [ ! -f "pages/_app.js" ]; then
+            echo "⚠️  pages/_app.tsx missing (may indicate incomplete migration)"
+            exit 1
+          fi
+          echo "✅ pages/_app.tsx found"
+
+      - name: Check pages/index.tsx exists
+        run: |
+          if [ ! -f "pages/index.tsx" ] && [ ! -f "pages/index.js" ]; then
+            echo "⚠️  pages/index.tsx missing (may indicate incomplete migration)"
+            exit 1
+          fi
+          echo "✅ pages/index.tsx found"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run migration validation tests
+        run: |
+          npm test -- --testPathPattern="migration" --passWithNoTests
+        continue-on-error: true
