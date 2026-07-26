@@ -619,3 +619,89 @@ mod tests {
         assert_eq!(engine.safety_margin_bps(), 11_000); // original untouched
     }
 }
+
+// ---------------------------------------------------------------------------
+// AssetHwmTracker — per-asset high-water mark tracking (Issue #60)
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+
+pub struct AssetHwmTracker {
+    hwm: HashMap<String, f64>,
+}
+
+impl AssetHwmTracker {
+    pub fn new() -> Self {
+        Self {
+            hwm: HashMap::new(),
+        }
+    }
+
+    pub fn update_hwm(&mut self, asset: &str, nav: f64) -> bool {
+        let entry = self.hwm.entry(asset.to_string()).or_insert(nav);
+        if nav > *entry {
+            *entry = nav;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn get_hwm(&self, asset: &str) -> f64 {
+        self.hwm.get(asset).copied().unwrap_or(0.0)
+    }
+
+    pub fn check_high_water_mark(&self, asset: &str, current_nav: f64) -> bool {
+        current_nav > self.get_hwm(asset)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LossRecoveryHwm — HWM that only ratchets up on net new highs (Issue #57)
+// ---------------------------------------------------------------------------
+
+pub struct LossRecoveryHwm {
+    pub hwm: f64,
+    pub has_recovered: bool,
+    pub trough_nav: f64,
+}
+
+impl LossRecoveryHwm {
+    pub fn new(initial_hwm: f64) -> Self {
+        Self {
+            hwm: initial_hwm,
+            has_recovered: false,
+            trough_nav: initial_hwm,
+        }
+    }
+
+    pub fn update(&mut self, current_nav: f64) -> bool {
+        if current_nav < self.trough_nav {
+            self.trough_nav = current_nav;
+            self.has_recovered = false;
+        }
+        if current_nav > self.hwm {
+            self.hwm = current_nav;
+            self.has_recovered = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_high_water(&self, nav: f64) -> bool {
+        nav >= self.hwm
+    }
+
+    pub fn recovery_percentage(&self) -> f64 {
+        if self.hwm == 0.0 || self.trough_nav == self.hwm {
+            return 100.0;
+        }
+        let drawdown = self.hwm - self.trough_nav;
+        if drawdown == 0.0 {
+            100.0
+        } else {
+            ((self.trough_nav - self.hwm).abs() / drawdown) * 100.0
+        }
+    }
+}
