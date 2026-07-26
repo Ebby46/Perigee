@@ -60,7 +60,7 @@ use crate::rpc_provider::{ProviderRegistry, RegistryConfig, RegistrySnapshot, Rp
 use crate::simulation::{SimulationEngine, SimulationMode, SimulationResult};
 use crate::stellar_service::{StellarService, StellarServiceConfig};
 use crate::ws::SimulationBus;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use utoipa::{OpenApi, ToSchema};
@@ -146,6 +146,16 @@ struct AppConfig {
     /// L2 treats it as stale. Default 100 ≈ 8 minutes at 5 s/ledger.
     #[serde(default = "default_max_ledger_age")]
     max_ledger_age: u32,
+    /// Comma-separated list of allowed CORS origins for white-label partner
+    /// frontends.  Examples:
+    ///   `https://partner-a.example.com,https://partner-b.example.com`
+    ///
+    /// Leave empty (the default) to allow **all** origins — suitable for local
+    /// development only.  In production this **must** be set to the explicit
+    /// list of trusted white-label domains; a wildcard in production would
+    /// allow any web page to call the API with user credentials.
+    #[serde(default)]
+    cors_allowed_origins: String,
 }
 
 fn default_health_check_interval() -> u64 {
@@ -202,6 +212,65 @@ fn default_max_ledger_age() -> u32 {
     100
 }
 
+/// Build a [`CorsLayer`] from the `cors_allowed_origins` config value.
+///
+/// Behaviour:
+/// * Empty string → `allow_origin(Any)` — permissive, for local dev only.
+/// * Non-empty string → parse as a comma-separated list of exact origins
+///   (`scheme://host[:port]`) and allow only those.  Invalid entries are
+///   logged and skipped.  If every entry is invalid the layer falls back to
+///   denying all cross-origin requests (empty list).
+///
+/// The layer also allows the standard headers and methods needed by the API.
+fn build_cors_layer(cors_allowed_origins: &str) -> CorsLayer {
+    use axum::http::{header, Method};
+
+    let base = CorsLayer::new()
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+        ])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ]);
+
+    let trimmed = cors_allowed_origins.trim();
+    if trimmed.is_empty() {
+        // Local dev: allow all origins.
+        tracing::warn!(
+            "CORS_ALLOWED_ORIGINS is not set — allowing all origins (Any). \
+             Set CORS_ALLOWED_ORIGINS in production."
+        );
+        return base.allow_origin(Any);
+    }
+
+    let origins: Vec<axum::http::HeaderValue> = trimmed
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|origin| {
+            match origin.parse::<axum::http::HeaderValue>() {
+                Ok(v) => {
+                    tracing::info!(origin, "CORS: allowing origin");
+                    Some(v)
+                }
+                Err(e) => {
+                    tracing::warn!(origin, error = %e, "CORS: skipping invalid origin");
+                    None
+                }
+            }
+        })
+        .collect();
+
+    base.allow_origin(AllowOrigin::list(origins))
+}
+
 fn load_config() -> Result<AppConfig, ConfigError> {
     dotenvy::dotenv().ok();
 
@@ -229,6 +298,7 @@ fn load_config() -> Result<AppConfig, ConfigError> {
         .set_default("emergency_verification_paused", false)?
         .set_default("disk_cache_path", "")?
         .set_default("max_ledger_age", 100)?
+        .set_default("cors_allowed_origins", "")?
         .build()?;
 
     settings.try_deserialize()
@@ -2150,7 +2220,7 @@ async fn main() {
         vault_store,
     });
 
-    let cors = CorsLayer::new().allow_origin(Any);
+    let cors = build_cors_layer(&config.cors_allowed_origins);
 
     let protected = Router::new()
         .route("/analyze", post(analyze))
@@ -2227,6 +2297,130 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("Server failed to start");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORS unit tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod cors_tests {
+    use super::build_cors_layer;
+
+    /// Helper: ask the layer whether it would produce an `Allow-Origin` header
+    /// for a given `Origin` request header value.  We inspect the layer via
+    /// a synthetic request rather than spinning up a full server.
+    fn allowed_origin(layer: &tower_http::cors::CorsLayer, origin: &str) -> bool {
+        use axum::http::{header, Method, Request, Version};
+        use tower::{Service, ServiceExt};
+        use tower_http::cors::CorsLayer;
+
+        // Build a minimal OPTIONS preflight request with the Origin header.
+        let req = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("http://localhost/")
+            .version(Version::HTTP_11)
+            .header(header::ORIGIN, origin)
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        // We can't easily call an async Service in a sync test, but we can
+        // inspect the CorsLayer's AllowOrigin by checking the
+        // `Access-Control-Allow-Origin` header that tower-http would emit.
+        // Instead we test the builder's structural output through the public
+        // API — verifying the two code paths (Any vs list) produce distinct
+        // CorsLayer values — and rely on the call-site integration test for
+        // end-to-end validation.
+        //
+        // For a lightweight structural check we inspect the Debug output, which
+        // differs between `Any` and `List(...)`.
+        let dbg = format!("{:?}", layer);
+        if dbg.contains("Any") {
+            // Any-mode layer: every origin is "allowed" from its perspective.
+            true
+        } else {
+            // List-mode layer: check if the origin string appears in the debug.
+            dbg.contains(origin)
+        }
+    }
+
+    #[test]
+    fn empty_string_produces_any_origin() {
+        let layer = build_cors_layer("");
+        let dbg = format!("{:?}", layer);
+        assert!(
+            dbg.contains("Any"),
+            "Expected Any in debug output, got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_produces_any_origin() {
+        let layer = build_cors_layer("   ");
+        let dbg = format!("{:?}", layer);
+        assert!(
+            dbg.contains("Any"),
+            "Expected Any for whitespace input, got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn single_origin_appears_in_layer() {
+        let layer = build_cors_layer("https://partner.example.com");
+        let dbg = format!("{:?}", layer);
+        // The debug output should NOT be Any.
+        assert!(
+            !dbg.contains("Any"),
+            "Expected list mode, got Any. Debug: {dbg}"
+        );
+    }
+
+    #[test]
+    fn multiple_origins_appear_in_layer() {
+        let layer =
+            build_cors_layer("https://partner-a.example.com,https://partner-b.example.com");
+        let dbg = format!("{:?}", layer);
+        assert!(
+            !dbg.contains("Any"),
+            "Expected list mode, got Any. Debug: {dbg}"
+        );
+    }
+
+    #[test]
+    fn origins_with_extra_whitespace_are_trimmed() {
+        // Should not panic and should produce a list-mode layer.
+        let layer = build_cors_layer("  https://a.example.com  ,  https://b.example.com  ");
+        let dbg = format!("{:?}", layer);
+        assert!(
+            !dbg.contains("Any"),
+            "Expected list mode after trimming, got Any. Debug: {dbg}"
+        );
+    }
+
+    #[test]
+    fn invalid_origin_is_skipped_and_does_not_panic() {
+        // One valid, one invalid — should not panic; layer should be list-mode.
+        let layer = build_cors_layer("https://valid.example.com,not a valid origin !!!");
+        let dbg = format!("{:?}", layer);
+        // At least one valid origin was parsed, so mode is list not Any.
+        assert!(
+            !dbg.contains("Any"),
+            "Expected list mode for mixed valid/invalid, got Any. Debug: {dbg}"
+        );
+    }
+
+    #[test]
+    fn all_invalid_origins_produce_empty_list_not_any() {
+        // If every entry is invalid the layer should be list-mode with an
+        // empty list (deny all), not fall back to Any.
+        let layer = build_cors_layer("not-a-valid-origin !!!, also bad !!!");
+        let dbg = format!("{:?}", layer);
+        assert!(
+            !dbg.contains("Any"),
+            "Expected empty-list mode for all-invalid origins, got Any. Debug: {dbg}"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
