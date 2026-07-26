@@ -621,6 +621,42 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
+// AssetHwmTracker — per-asset high-water mark tracking (Issue #60)
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+
+pub struct AssetHwmTracker {
+    hwm: HashMap<String, f64>,
+}
+
+impl AssetHwmTracker {
+    pub fn new() -> Self {
+        Self {
+            hwm: HashMap::new(),
+        }
+    }
+
+    pub fn update_hwm(&mut self, asset: &str, nav: f64) -> bool {
+        let entry = self.hwm.entry(asset.to_string()).or_insert(nav);
+        if nav > *entry {
+            *entry = nav;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn get_hwm(&self, asset: &str) -> f64 {
+        self.hwm.get(asset).copied().unwrap_or(0.0)
+    }
+
+    pub fn check_high_water_mark(&self, asset: &str, current_nav: f64) -> bool {
+        current_nav > self.get_hwm(asset)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LossRecoveryHwm — HWM that only ratchets up on net new highs (Issue #57)
 // ---------------------------------------------------------------------------
 
