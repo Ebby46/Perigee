@@ -19,6 +19,10 @@ pub mod simulation;
 pub mod stellar_service;
 pub mod simulation_service;
 pub mod wasm_branch_analysis;
+pub mod vault_validation;
+pub mod namespaced_errors;
+pub mod policy_expiry;
+pub mod oracle_guard;
 
 #[cfg(test)]
 pub mod fuzz_simulation;
