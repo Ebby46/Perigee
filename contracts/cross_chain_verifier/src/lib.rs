@@ -28,6 +28,7 @@ pub struct SignedMessage {
     pub signature: BytesN<64>,
     pub signer_public_key: Bytes,
     pub algorithm: SignatureAlgorithm,
+    pub revocation_nonce: u64,
 }
 
 #[contracttype]
@@ -42,6 +43,7 @@ pub enum DataKey {
     SignerCount,
     StateRoot(u32), // block height mapped to state root
     ProcessedNonce(u64), // track consumed nonces for replay protection
+    SignerRevocationNonce(Bytes), // per-signer monotonic nonce incremented on revocation
 }
 
 #[contract]
@@ -120,6 +122,9 @@ impl CrossChainVerifier {
         // Store algorithm for this signer (O(1))
         env.storage().persistent().set(&DataKey::SignerAlgorithm(public_key.clone()), &algorithm);
 
+        // Initialize revocation nonce to 0 for new signer
+        env.storage().persistent().set(&DataKey::SignerRevocationNonce(public_key.clone()), &0u64);
+
         // Increment signer count for monitoring
         let count: u32 = env.storage().persistent().get(&DataKey::SignerCount).unwrap_or(0);
         env.storage().persistent().set(&DataKey::SignerCount, &(count + 1));
@@ -174,7 +179,11 @@ impl CrossChainVerifier {
         }
 
         // Remove signer from indexed storage (O(1))
-        env.storage().persistent().remove(&DataKey::SignerAlgorithm(public_key));
+        env.storage().persistent().remove(&DataKey::SignerAlgorithm(public_key.clone()));
+
+        // Increment revocation nonce to invalidate signatures created before revocation
+        let current_nonce: u64 = env.storage().persistent().get(&DataKey::SignerRevocationNonce(public_key.clone())).unwrap_or(0);
+        env.storage().persistent().set(&DataKey::SignerRevocationNonce(public_key), &(current_nonce + 1));
 
         // Decrement signer count
         let count: u32 = env.storage().persistent().get(&DataKey::SignerCount).unwrap_or(0);
@@ -381,6 +390,18 @@ impl CrossChainVerifier {
             Some(algo) => algo,
             None => return false, // Signer not authorized
         };
+
+        // Check revocation nonce to prevent stale signer set after revocation
+        let current_nonce: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SignerRevocationNonce(signed_message.signer_public_key.clone()))
+            .unwrap_or(0);
+        
+        // Reject if the message's nonce is less than the current revocation nonce
+        if signed_message.revocation_nonce < current_nonce {
+            return false;
+        }
 
         // Hash the message for signature verification
         let message_hash = Self::hash_message(&env, &signed_message.message);
