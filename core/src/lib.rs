@@ -19,6 +19,18 @@ pub mod simulation;
 pub mod stellar_service;
 pub mod simulation_service;
 pub mod wasm_branch_analysis;
+pub mod config_versioning;
+pub mod settlement;
+pub mod note_privacy;
+pub mod rounding;
+pub mod agent_identity;
+pub mod agent_health;
+pub mod failover;
+pub mod rate_limiter;
+pub mod validation;
+pub mod fee_validation;
+pub mod secure_ids;
+pub mod audit_log;
 
 #[cfg(test)]
 pub mod fuzz_simulation;
