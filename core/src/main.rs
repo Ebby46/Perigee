@@ -23,6 +23,7 @@ mod secret_hash;
 mod simulation;
 mod simulation_service;
 mod stellar_service;
+pub mod vault_store;
 mod wasm_branch_analysis;
 mod ws;
 
@@ -339,6 +340,8 @@ pub struct AppState {
     reconciler: Arc<FeeReconciler>,
     /// SQLite pool for reconciliation queries
     reconciler_pool: sqlx::SqlitePool,
+    /// White-label vault records with optimistic locking (API-37).
+    vault_store: Arc<vault_store::VaultStore>,
 }
 
 #[derive(Clone)]
@@ -1528,7 +1531,9 @@ pub struct FeeAnalyticsEnvelope {
         analyze, analyze_wasm, optimize_limits, compare_handler,
         auth::challenge_handler, auth::verify_handler, auth::refresh_handler,
         auth::revoke_handler, auth::jwks_handler,
-        fee_recommend, fee_history, fee_analytics
+        fee_recommend, fee_history, fee_analytics,
+        vault_store::create_vault_handler, vault_store::get_vault_handler,
+        vault_store::update_vault_handler
     ),
     components(schemas(
         AnalyzeRequest, AnalyzeWasmRequest, AnalyzeWasmBranchesRequest,
@@ -1551,12 +1556,15 @@ pub struct FeeAnalyticsEnvelope {
         crate::fee_analytics::MarketConditions,
         crate::fee_analytics::ModelBreakdown,
         crate::fee_analytics::TrendDirection,
-        FeeAnalyticsEnvelope
+        FeeAnalyticsEnvelope,
+        vault_store::VaultRecord, vault_store::CreateVaultRequest,
+        vault_store::UpdateVaultRequest
     )),
     tags(
         (name = "Analysis", description = "Soroban contract resource analysis endpoints"),
         (name = "Auth", description = "SEP-10 wallet authentication"),
         (name = "Fee Market", description = "Stellar/Soroban fee market analysis and prediction"),
+        (name = "Vaults", description = "White-label vault records with optimistic locking"),
         (name = "Streaming", description = "WebSocket real-time simulation progress streaming")
     ),
     info(
@@ -2005,6 +2013,7 @@ async fn main() {
     tracing::info!("Database migrations completed");
 
     let fee_store = Arc::new(FeeStore::new(db_pool.clone()));
+    let vault_store = Arc::new(vault_store::VaultStore::new(db_pool.clone()));
     let fee_analytics_engine = FeeAnalyticsEngine::new();
     let reconciler = Arc::new(FeeReconciler::new(Arc::clone(&fee_store), db_pool.clone()));
     // API-28: business-logic service owns fee / billing math; wired into
@@ -2138,6 +2147,7 @@ async fn main() {
         simulation_bus,
         reconciler,
         reconciler_pool: db_pool.clone(),
+        vault_store,
     });
 
     let cors = CorsLayer::new().allow_origin(Any);
@@ -2172,6 +2182,12 @@ async fn main() {
         .route("/fees/recommend", get(fee_recommend))
         .route("/fees/history", get(fee_history))
         .route("/fees/analytics", get(fee_analytics))
+        // Vault records with optimistic locking (API-37)
+        .route("/vaults", post(vault_store::create_vault_handler))
+        .route(
+            "/vaults/:id",
+            get(vault_store::get_vault_handler).patch(vault_store::update_vault_handler),
+        )
         // Reconciliation routes (async via job queue)
         .route("/reconcile", post(reconciliation::reconcile_handler))
         .route(
