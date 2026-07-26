@@ -4,14 +4,36 @@ use axum::{
     Json,
 };
 use serde::Serialize;
+use std::env;
 use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::simulation::SimulationError;
 
+/// Returns `true` when `APP_ENV=production`.
+///
+/// The check is intentionally strict: every value other than the literal
+/// string `"production"` is treated as non-production so that missing or
+/// misspelled values are safe by default in test/staging environments.
+///
+/// The value is read fresh on every call so that tests can override it with
+/// `std::env::set_var` without needing a process restart.
+pub fn is_production() -> bool {
+    env::var("APP_ENV")
+        .ok()
+        .map(|v| v.trim().eq_ignore_ascii_case("production"))
+        .unwrap_or(false)
+}
+
 #[derive(Error, Debug)]
 #[allow(dead_code)]
 pub enum AppError {
+    /// Internal server errors.
+    ///
+    /// The inner string contains full diagnostic detail suitable for logging
+    /// but **must not** be forwarded to HTTP clients in production.  The
+    /// [`IntoResponse`] implementation redacts it when [`is_production`]
+    /// returns `true`.
     #[error("Internal server error")]
     Internal(String),
 
@@ -21,8 +43,73 @@ pub enum AppError {
     #[error("Bad request: {0}")]
     BadRequest(String),
 
-    #[error("Unauthorized: {0}")]
+    /// Unauthorized errors.
+    ///
+    /// The inner string may reveal internal auth logic (e.g. JWT parsing
+    /// details) so it is also redacted in production.
+    #[error("Unauthorized")]
     Unauthorized(String),
+}
+
+impl AppError {
+    /// Return the inner diagnostic string for use in **server-side logs only**.
+    ///
+    /// Callers should never forward this value to HTTP response bodies; use
+    /// [`IntoResponse`] which applies the production-redaction policy.
+    pub fn diagnostic(&self) -> &str {
+        match self {
+            Self::Internal(msg) | Self::NotFound(msg) | Self::BadRequest(msg)
+            | Self::Unauthorized(msg) => msg.as_str(),
+        }
+    }
+
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+        }
+    }
+
+    fn error_type(&self) -> &'static str {
+        match self {
+            Self::Internal(_) => "INTERNAL_SERVER_ERROR",
+            Self::NotFound(_) => "NOT_FOUND",
+            Self::BadRequest(_) => "BAD_REQUEST",
+            Self::Unauthorized(_) => "UNAUTHORIZED",
+        }
+    }
+
+    /// The client-visible message for this error.
+    ///
+    /// In production, `Internal` and `Unauthorized` variants return a static
+    /// opaque string so that stack traces, DB errors, and auth internals are
+    /// never forwarded to HTTP clients.  In non-production the full diagnostic
+    /// string is returned to aid debugging.
+    fn client_message(&self) -> String {
+        match self {
+            // Safe variants — their detail is always client-appropriate.
+            Self::NotFound(msg) => format!("Not found: {}", msg),
+            Self::BadRequest(msg) => format!("Bad request: {}", msg),
+
+            // Sensitive variants — redact in production.
+            Self::Internal(msg) => {
+                if is_production() {
+                    "An internal server error occurred. Please try again later.".to_string()
+                } else {
+                    format!("Internal server error: {}", msg)
+                }
+            }
+            Self::Unauthorized(msg) => {
+                if is_production() {
+                    "Unauthorized.".to_string()
+                } else {
+                    format!("Unauthorized: {}", msg)
+                }
+            }
+        }
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -33,32 +120,22 @@ pub struct ErrorResponse {
     message: String,
 }
 
-impl AppError {
-    fn status_code(&self) -> StatusCode {
-        match self {
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
-        }
-    }
-
-    fn error_type(&self) -> &str {
-        match self {
-            Self::Internal(_) => "INTERNAL_SERVER_ERROR",
-            Self::NotFound(_) => "NOT_FOUND",
-            Self::BadRequest(_) => "BAD_REQUEST",
-            Self::Unauthorized(_) => "UNAUTHORIZED",
-        }
-    }
-}
-
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status_code();
+
+        // Log the full diagnostic detail server-side regardless of environment.
+        // Sensitive details never reach the HTTP response body in production.
+        tracing::error!(
+            error_type = self.error_type(),
+            status = status.as_u16(),
+            detail = self.diagnostic(),
+            "Request failed"
+        );
+
         let body = Json(ErrorResponse {
             error: self.error_type().to_string(),
-            message: self.to_string(),
+            message: self.client_message(),
         });
 
         (status, body).into_response()
@@ -116,5 +193,86 @@ impl From<SimulationError> for AppError {
                 AppError::Internal(format!("Consensus mismatch: {}", msg))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_env(value: &str, f: impl FnOnce()) {
+        // Crude serial env-var toggle for unit tests (no parallel test concern
+        // because cfg(test) runs are single-threaded by default for this module).
+        unsafe { env::set_var("APP_ENV", value) };
+        f();
+        unsafe { env::remove_var("APP_ENV") };
+    }
+
+    #[test]
+    fn is_production_true_for_production() {
+        with_env("production", || assert!(is_production()));
+    }
+
+    #[test]
+    fn is_production_case_insensitive() {
+        with_env("Production", || assert!(is_production()));
+        with_env("PRODUCTION", || assert!(is_production()));
+    }
+
+    #[test]
+    fn is_production_false_for_staging() {
+        with_env("staging", || assert!(!is_production()));
+    }
+
+    #[test]
+    fn is_production_false_when_unset() {
+        unsafe { env::remove_var("APP_ENV") };
+        assert!(!is_production());
+    }
+
+    #[test]
+    fn internal_error_redacted_in_production() {
+        with_env("production", || {
+            let err = AppError::Internal("DB error: password=hunter2".to_string());
+            let msg = err.client_message();
+            assert!(!msg.contains("hunter2"), "DB detail leaked: {}", msg);
+            assert!(!msg.contains("DB error"), "Internal detail leaked: {}", msg);
+        });
+    }
+
+    #[test]
+    fn internal_error_exposed_in_dev() {
+        unsafe { env::remove_var("APP_ENV") };
+        let err = AppError::Internal("debug info".to_string());
+        let msg = err.client_message();
+        assert!(msg.contains("debug info"));
+    }
+
+    #[test]
+    fn unauthorized_redacted_in_production() {
+        with_env("production", || {
+            let err = AppError::Unauthorized("JWT parse failed at byte 42".to_string());
+            let msg = err.client_message();
+            assert!(!msg.contains("JWT"), "Auth detail leaked: {}", msg);
+            assert!(!msg.contains("byte 42"), "Auth detail leaked: {}", msg);
+        });
+    }
+
+    #[test]
+    fn bad_request_always_exposes_detail() {
+        with_env("production", || {
+            let err = AppError::BadRequest("invalid contract ID format".to_string());
+            let msg = err.client_message();
+            assert!(msg.contains("invalid contract ID format"));
+        });
+    }
+
+    #[test]
+    fn not_found_always_exposes_detail() {
+        with_env("production", || {
+            let err = AppError::NotFound("contract ABC not deployed".to_string());
+            let msg = err.client_message();
+            assert!(msg.contains("contract ABC not deployed"));
+        });
     }
 }

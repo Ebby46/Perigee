@@ -61,6 +61,12 @@ use utoipa_swagger_ui::SwaggerUi;
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct AppConfig {
+    /// Deployment environment. Set to `"production"` to enable
+    /// production-safe error redaction (strips internal details from HTTP
+    /// responses). Any other value — including absent — is treated as
+    /// non-production so that misconfigured deployments fail safe.
+    #[serde(default)]
+    app_env: String,
     /// Port for the HTTP server
     server_port: u16,
     /// Rust log level (e.g., "info", "debug")
@@ -963,7 +969,7 @@ async fn analyze_wasm(
             .rpc_error_count_total
             .with_label_values(&["/analyze/wasm", "panic"])
             .inc();
-        AppError::Internal(format!("Contract profiling task panicked: {}", e))
+        join_error_to_internal("Contract profiling task", e)
     })?
     .map_err(|e| {
         state
@@ -1056,7 +1062,7 @@ async fn analyze_wasm_profile(
             state.simulation_timeout.as_secs()
         ))
     })?
-    .map_err(|e| AppError::Internal(format!("Profiling task panicked: {}", e)))?
+    .map_err(|e| join_error_to_internal("Profiling task", e))?
     .map_err(|e| AppError::BadRequest(format!("Profiling failed: {}", e)))?;
 
     let (resources, profile) = result;
@@ -1102,7 +1108,7 @@ async fn analyze_wasm_branches(
 
     let report = tokio::task::spawn_blocking(move || run_analysis(wasm_bytes, function_name, args))
         .await
-        .map_err(|e| AppError::Internal(format!("Branch analysis task panicked: {}", e)))?
+        .map_err(|e| join_error_to_internal("Branch analysis task", e))?
         .map_err(|e| AppError::Internal(format!("Branch analysis failed: {}", e)))?;
 
     tracing::info!(
@@ -1311,6 +1317,31 @@ async fn compare_handler(
         .map_err(|e| AppError::Internal(format!("Comparison failed: {}", e)))?;
 
     Ok(Json(CompareApiResponse { report }))
+}
+
+/// Sanitize a [`tokio::task::JoinError`] into an [`AppError::Internal`].
+///
+/// A panic payload's `Display` can expose source file paths and line numbers
+/// (e.g. `"task panicked at 'assertion failed', src/simulation.rs:412"`).
+/// In production we emit only the static category string and log the full
+/// detail server-side.  In development the full message is preserved for
+/// easier debugging.
+fn join_error_to_internal(context: &str, e: tokio::task::JoinError) -> AppError {
+    if e.is_panic() {
+        tracing::error!(
+            context = context,
+            panic_detail = %e,
+            "spawn_blocking task panicked"
+        );
+        if crate::errors::is_production() {
+            AppError::Internal(format!("{}: task panicked", context))
+        } else {
+            AppError::Internal(format!("{}: task panicked — {}", context, e))
+        }
+    } else {
+        // Cancellation — safe to surface
+        AppError::Internal(format!("{}: task was cancelled", context))
+    }
 }
 
 /// Write WASM bytes to a temporary file and return the path.
@@ -1567,6 +1598,17 @@ struct ApiDoc;
 
 async fn health_check() -> &'static str {
     "OK"
+}
+
+/// Fallback handler for all unmatched routes.
+///
+/// Returns a uniform JSON `{"error":"NOT_FOUND","message":"..."}` body
+/// instead of axum's default plain-text response, which could expose
+/// routing internals or framework version strings.
+async fn not_found_handler(request: axum::extract::Request) -> impl IntoResponse {
+    let path = request.uri().path().to_owned();
+    tracing::debug!(path = %path, "Unmatched route");
+    AppError::NotFound(format!("No route for {}", path))
 }
 
 async fn registry_providers(
@@ -2130,6 +2172,10 @@ async fn main() {
         // the client passes the job_id in the path.
         .route("/ws/jobs/:job_id", get(ws::ws_handler))
         .merge(protected)
+        // Catch-all fallback: return a structured JSON 404 instead of
+        // axum's default plain-text body, which could expose framework
+        // version strings or routing internals.
+        .fallback(not_found_handler)
         .layer(Extension(auth_state))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
