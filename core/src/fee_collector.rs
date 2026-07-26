@@ -320,6 +320,19 @@ impl FeeCollector {
     }
 }
 
+// ---------------------------------------------------------------------------
+// deduct_network_fees — subtract gas cost from NAVs before HWM compare (Issue #61)
+// ---------------------------------------------------------------------------
+
+/// Deduct per-transaction network/gas fees from a list of NAV values.
+/// Returns a new Vec with gas costs subtracted, clamped to zero.
+pub fn deduct_network_fees(navs: Vec<f64>, gas_cost_per_tx: f64, tx_count: usize) -> Vec<f64> {
+    let total_gas = gas_cost_per_tx * tx_count as f64;
+    navs.into_iter()
+        .map(|nav| (nav - total_gas).max(0.0))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +343,19 @@ mod tests {
         assert_eq!(config.collection_interval_secs, 5);
         assert_eq!(config.batch_size, 10);
         assert_eq!(config.request_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_deduct_network_fees() {
+        let navs = vec![1000.0, 2000.0, 500.0];
+        let result = deduct_network_fees(navs, 10.0, 5);
+        assert_eq!(result, vec![950.0, 1950.0, 450.0]);
+    }
+
+    #[test]
+    fn test_deduct_network_fees_clamp_to_zero() {
+        let navs = vec![30.0, 10.0];
+        let result = deduct_network_fees(navs, 10.0, 5);
+        assert_eq!(result, vec![0.0, 0.0]);
     }
 }
