@@ -1,6 +1,6 @@
 use crate::{AccountSignerPolicy, AccountSignerPolicyClient, Domain, PolicyError, Transfer, TypedDataAuth};
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, BytesN, Env, String};
+use soroban_sdk::{symbol_short, Address, BytesN, Env, String};
 
 #[test]
 fn test_domain_separator_hash() {
@@ -126,4 +126,74 @@ fn test_account_signer_policy_allows_signer_changes_when_enabled() {
 
     client.update_account_signer(&admin, &co_signer, &0);
     assert_eq!(client.get_signer_weight(&co_signer), 0);
+}
+
+// PV-04: scoped calls must carry a per-vault, per-agent nonce so a captured
+// authorization cannot be replayed within the same ledger.
+
+#[test]
+fn test_scoped_call_rejects_replayed_nonce() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, AccountSignerPolicy);
+    let client = AccountSignerPolicyClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let action = symbol_short!("rebal");
+
+    env.mock_all_auths();
+    client.initialize(&admin, &false);
+
+    assert_eq!(client.agent_nonce(&agent), 0);
+    client.execute_scoped_call(&agent, &action, &0);
+    assert_eq!(client.agent_nonce(&agent), 1);
+
+    // Replaying the same (already-consumed) nonce must fail.
+    let res = client.try_execute_scoped_call(&agent, &action, &0);
+    assert_eq!(res, Err(Ok(PolicyError::InvalidNonce)));
+
+    // The correct next nonce succeeds.
+    client.execute_scoped_call(&agent, &action, &1);
+    assert_eq!(client.agent_nonce(&agent), 2);
+}
+
+#[test]
+fn test_scoped_call_rejects_skipped_nonce() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, AccountSignerPolicy);
+    let client = AccountSignerPolicyClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let action = symbol_short!("rebal");
+
+    env.mock_all_auths();
+    client.initialize(&admin, &false);
+
+    // Skipping ahead to nonce 5 without consuming 0-4 must fail.
+    let res = client.try_execute_scoped_call(&agent, &action, &5);
+    assert_eq!(res, Err(Ok(PolicyError::InvalidNonce)));
+}
+
+#[test]
+fn test_scoped_call_nonces_are_independent_per_agent() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, AccountSignerPolicy);
+    let client = AccountSignerPolicyClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let agent_a = Address::generate(&env);
+    let agent_b = Address::generate(&env);
+    let action = symbol_short!("rotate");
+
+    env.mock_all_auths();
+    client.initialize(&admin, &false);
+
+    client.execute_scoped_call(&agent_a, &action, &0);
+    assert_eq!(client.agent_nonce(&agent_a), 1);
+    assert_eq!(client.agent_nonce(&agent_b), 0);
+
+    // agent_b's nonce sequence starts independently at 0.
+    client.execute_scoped_call(&agent_b, &action, &0);
+    assert_eq!(client.agent_nonce(&agent_b), 1);
 }

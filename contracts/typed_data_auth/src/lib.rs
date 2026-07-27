@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, xdr::ToXdr, Address, Bytes,
-    BytesN, Env, String,
+    BytesN, Env, String, Symbol,
 };
 
 #[contracttype]
@@ -28,6 +28,7 @@ pub enum PolicyDataKey {
     Admin,
     AllowSignerChanges,
     SignerWeight(Address),
+    AgentNonce(Address),
 }
 
 #[contracterror]
@@ -39,6 +40,7 @@ pub enum PolicyError {
     Unauthorized = 3,
     SignerChangesForbidden = 4,
     InvalidWeight = 5,
+    InvalidNonce = 6,
 }
 
 #[contract]
@@ -220,6 +222,43 @@ impl AccountSignerPolicy {
             .persistent()
             .get(&PolicyDataKey::SignerWeight(signer))
             .unwrap_or(0)
+    }
+
+    /// Next nonce `agent` must supply to `execute_scoped_call` on this vault's policy contract.
+    pub fn agent_nonce(env: Env, agent: Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&PolicyDataKey::AgentNonce(agent))
+            .unwrap_or(0)
+    }
+
+    /// Executes a scoped action (e.g. rebalance / rotate / claim fee) on behalf of `agent`,
+    /// per this vault's allow-listed permissions.
+    ///
+    /// The caller must supply the exact next per-vault, per-agent nonce (see `agent_nonce`).
+    /// Since this contract is deployed per vault, keying the counter by agent gives per-vault,
+    /// per-agent sequencing: a captured authorization replayed with a stale nonce is rejected,
+    /// closing the same-ledger replay window that `require_auth()` alone does not cover for
+    /// scoped calls.
+    pub fn execute_scoped_call(
+        env: Env,
+        agent: Address,
+        action: Symbol,
+        nonce: u64,
+    ) -> Result<(), PolicyError> {
+        agent.require_auth();
+
+        let key = PolicyDataKey::AgentNonce(agent.clone());
+        let expected: u64 = env.storage().instance().get(&key).unwrap_or(0);
+        if nonce != expected {
+            return Err(PolicyError::InvalidNonce);
+        }
+
+        env.storage().instance().set(&key, &(expected + 1));
+
+        env.events()
+            .publish((symbol_short!("scoped"),), (agent, action, nonce));
+        Ok(())
     }
 }
 
