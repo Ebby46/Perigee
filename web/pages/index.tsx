@@ -8,6 +8,7 @@ import { FunctionSidebar } from "../components/FunctionSidebar";
 import { ResultViewer } from "../components/Resultviewer";
 import { UploadZone } from "../components/upload-zone";
 import { analyzeService } from "../lib/api";
+import { contractIds } from "../lib/contracts.config";
 import {
   MOCK_CONTRACT_FUNCTIONS,
   generateMockResult,
@@ -18,7 +19,7 @@ import {
 
 export default function Home() {
   const [contractId, setContractId] = useState(
-    "CAEZJVJ4N7P7GRUVD5NG5LYYH23AQHJUKQEUHW54LR5PGQX3V7FXD7Q",
+    contractIds.helloSoroban ?? "",
   );
   const [selectedFunction, setSelectedFunction] = useState<ContractFunction>(
     MOCK_CONTRACT_FUNCTIONS[0],
