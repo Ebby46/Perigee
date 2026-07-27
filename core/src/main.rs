@@ -24,6 +24,7 @@ mod simulation;
 mod simulation_service;
 mod stellar_service;
 pub mod vault_store;
+mod manager_store;
 mod wasm_branch_analysis;
 mod ws;
 
@@ -418,6 +419,8 @@ pub struct AppState {
     reconciler_pool: sqlx::SqlitePool,
     /// White-label vault records with optimistic locking (API-37).
     vault_store: Arc<vault_store::VaultStore>,
+    /// Manager onboarding with approval/KYC gate (API-33).
+    manager_store: Arc<manager_store::ManagerStore>,
 }
 
 #[derive(Clone)]
@@ -2124,6 +2127,7 @@ async fn main() {
 
     let fee_store = Arc::new(FeeStore::new(db_pool.clone()));
     let vault_store = Arc::new(vault_store::VaultStore::new(db_pool.clone()));
+    let manager_store = Arc::new(manager_store::ManagerStore::new(db_pool.clone()));
     let fee_analytics_engine = FeeAnalyticsEngine::new();
     let reconciler = Arc::new(FeeReconciler::new(Arc::clone(&fee_store), db_pool.clone()));
     // API-28: business-logic service owns fee / billing math; wired into
@@ -2258,6 +2262,7 @@ async fn main() {
         reconciler,
         reconciler_pool: db_pool.clone(),
         vault_store,
+        manager_store,
     });
 
     let cors = build_cors_layer(&config.cors_allowed_origins);
@@ -2297,6 +2302,25 @@ async fn main() {
         .route(
             "/vaults/:id",
             get(vault_store::get_vault_handler).patch(vault_store::update_vault_handler),
+        )
+        // Manager onboarding with approval/KYC gate (API-33)
+        .route("/managers/register", post(manager_store::register_manager_handler))
+        .route("/managers", get(manager_store::list_managers_handler))
+        .route(
+            "/managers/:id",
+            get(manager_store::get_manager_handler),
+        )
+        .route(
+            "/managers/:id/approve",
+            post(manager_store::approve_manager_handler),
+        )
+        .route(
+            "/managers/:id/reject",
+            post(manager_store::reject_manager_handler),
+        )
+        .route(
+            "/managers/status/:stellar_address",
+            get(manager_store::check_manager_status_handler),
         )
         // Reconciliation routes (async via job queue)
         .route("/reconcile", post(reconciliation::reconcile_handler))
