@@ -26,6 +26,29 @@ const nextConfig = {
     // App Router will be enabled incrementally
     // See MIGRATION.md for migration phases
   },
+
+  async headers() {
+    return [
+      {
+        source: "/:path*.wasm",
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "public, max-age=31536000, immutable",
+          },
+        ],
+      },
+      {
+        source: "/api/wasm/:path*",
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "no-cache, no-store, must-revalidate",
+          },
+        ],
+      },
+    ];
+  },
 };
 
 module.exports = nextConfig;

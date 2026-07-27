@@ -22,6 +22,35 @@ export default function ManagerOnboarding() {
   const [managerRecord, setManagerRecord] = useState<Awaited<ReturnType<typeof managerService.register>> | null>(null);
 
   useEffect(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const savedDraft = sessionStorage.getItem("onboarding_draft");
+        if (savedDraft) {
+          const parsed = JSON.parse(savedDraft);
+          if (parsed.name) setName(parsed.name);
+          if (parsed.email) setEmail(parsed.email);
+          if (parsed.kycRef) setKycRef(parsed.kycRef);
+        }
+      } catch {
+        // ignore storage parse errors
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && step === "register") {
+      try {
+        sessionStorage.setItem(
+          "onboarding_draft",
+          JSON.stringify({ name, email, kycRef })
+        );
+      } catch {
+        // ignore storage errors
+      }
+    }
+  }, [name, email, kycRef, step]);
+
+  useEffect(() => {
     if (address) {
       checkExisting(address);
     }
@@ -64,6 +93,9 @@ export default function ManagerOnboarding() {
       });
       setManagerRecord(record);
       setStep("submitted");
+      if (typeof window !== "undefined") {
+        sessionStorage.removeItem("onboarding_draft");
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Registration failed";
       setError(msg);

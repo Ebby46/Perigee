@@ -70,6 +70,13 @@ const generateHash = async (file: File): Promise<string> => {
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 };
 
+// Version WASM filenames by appending content hash to invalidate stale caches
+export const getVersionedWasmFilename = (filename: string, hash: string): string => {
+  const version = hash.slice(0, 8);
+  const base = filename.replace(/\.wasm$/i, "");
+  return `${base}.v-${version}.wasm`;
+};
+
 //component
 
 export default function WasmUpload({
