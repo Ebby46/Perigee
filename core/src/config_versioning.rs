@@ -39,6 +39,10 @@ impl TriggerConfigVersioner {
         time: DateTime<Utc>,
     ) -> Option<&VersionedTriggerConfig> {
         let configs = self.versions.get(trigger_type)?;
+        configs
+            .iter()
+            .filter(|c| c.created_at <= time)
+            .last()
         configs.iter().filter(|c| c.created_at <= time).last()
     }
 
