@@ -3,6 +3,7 @@
 import React, { useEffect } from "react";
 import type { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit";
 import { createStore, createUseStore, shallow } from "../lib/createStore";
+import { clearLatestAnalysis } from "../lib/analysisStorage";
 import { logger } from "../lib/logger";
 
 interface WalletState {
@@ -79,6 +80,7 @@ const walletStore = createStore<WalletState>((set, get) => ({
     localStorage.removeItem("inheritx_wallet_address");
     localStorage.removeItem("inheritx_wallet_id");
     sessionStorage.removeItem("perigee_wallet_id");
+    clearLatestAnalysis();
   },
 
   openModal: () => set({ error: null, isModalOpen: true }),
