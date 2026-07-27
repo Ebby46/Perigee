@@ -127,3 +127,124 @@ fn test_account_signer_policy_allows_signer_changes_when_enabled() {
     client.update_account_signer(&admin, &co_signer, &0);
     assert_eq!(client.get_signer_weight(&co_signer), 0);
 }
+
+// PV-02: approved-asset list must be bounded, with expansion requiring an explicit migration.
+
+#[test]
+fn test_add_approved_asset_enforces_configured_cap() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, AccountSignerPolicy);
+    let client = AccountSignerPolicyClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset_a = Address::generate(&env);
+    let asset_b = Address::generate(&env);
+    let asset_c = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &false);
+    client.set_max_approved_assets(&admin, &2);
+
+    client.add_approved_asset(&admin, &asset_a);
+    client.add_approved_asset(&admin, &asset_b);
+
+    let res = client.try_add_approved_asset(&admin, &asset_c);
+    assert_eq!(res, Err(Ok(PolicyError::AssetListFull)));
+    assert_eq!(client.get_approved_assets().len(), 2);
+}
+
+#[test]
+fn test_add_approved_asset_rejects_duplicate() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, AccountSignerPolicy);
+    let client = AccountSignerPolicyClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &false);
+    client.add_approved_asset(&admin, &asset);
+
+    let res = client.try_add_approved_asset(&admin, &asset);
+    assert_eq!(res, Err(Ok(PolicyError::AssetAlreadyApproved)));
+}
+
+#[test]
+fn test_remove_approved_asset_then_readd_succeeds() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, AccountSignerPolicy);
+    let client = AccountSignerPolicyClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &false);
+    client.add_approved_asset(&admin, &asset);
+    assert_eq!(client.get_approved_assets().len(), 1);
+
+    client.remove_approved_asset(&admin, &asset);
+    assert_eq!(client.get_approved_assets().len(), 0);
+
+    client.add_approved_asset(&admin, &asset);
+    assert_eq!(client.get_approved_assets().len(), 1);
+}
+
+#[test]
+fn test_expanding_asset_cap_requires_explicit_migration() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, AccountSignerPolicy);
+    let client = AccountSignerPolicyClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset_a = Address::generate(&env);
+    let asset_b = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &false);
+    client.set_max_approved_assets(&admin, &1);
+    client.add_approved_asset(&admin, &asset_a);
+
+    // Still bounded until the admin explicitly migrates the cap upward.
+    let res = client.try_add_approved_asset(&admin, &asset_b);
+    assert_eq!(res, Err(Ok(PolicyError::AssetListFull)));
+
+    client.set_max_approved_assets(&admin, &2);
+    client.add_approved_asset(&admin, &asset_b);
+    assert_eq!(client.get_approved_assets().len(), 2);
+}
+
+#[test]
+fn test_max_approved_assets_cannot_exceed_ceiling() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, AccountSignerPolicy);
+    let client = AccountSignerPolicyClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &false);
+
+    let res = client.try_set_max_approved_assets(&admin, &501);
+    assert_eq!(res, Err(Ok(PolicyError::InvalidMaxApprovedAssets)));
+}
+
+#[test]
+fn test_max_approved_assets_cannot_drop_below_current_length() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, AccountSignerPolicy);
+    let client = AccountSignerPolicyClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let asset_a = Address::generate(&env);
+    let asset_b = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &false);
+    client.add_approved_asset(&admin, &asset_a);
+    client.add_approved_asset(&admin, &asset_b);
+
+    let res = client.try_set_max_approved_assets(&admin, &1);
+    assert_eq!(res, Err(Ok(PolicyError::InvalidMaxApprovedAssets)));
+}
