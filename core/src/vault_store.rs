@@ -234,6 +234,16 @@ pub async fn create_vault_handler(
     State(state): State<Arc<crate::AppState>>,
     Json(payload): Json<CreateVaultRequest>,
 ) -> Result<Json<VaultRecord>, AppError> {
+    let approved = state
+        .manager_store
+        .is_approved(&payload.manager_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    if !approved {
+        return Err(AppError::BadRequest(
+            "Manager is not approved. Only approved managers may create vaults. Register via /managers/register and wait for approval.".into(),
+        ));
+    }
     let vault = state.vault_store.create(&payload).await?;
     Ok(Json(vault))
 }
