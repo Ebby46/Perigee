@@ -4,6 +4,15 @@ const nextConfig = {
   transpilePackages: ["@creit.tech/stellar-wallets-kit"],
   turbopack: {},
 
+  images: {
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "stellar.creit.tech",
+      },
+    ],
+  },
+
   // MIGRATION STATUS: Pages Router active
   // Explicit configuration to maintain Pages Router stability during migration.
   // Both pages/ and app/ directories can coexist during incremental migration.
