@@ -60,6 +60,7 @@ pub struct VaultRecord {
     pub status: String,
     pub config_json: String,
     pub version: i64,
+    pub idempotency_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -72,6 +73,8 @@ pub struct CreateVaultRequest {
     pub status: String,
     #[serde(default = "default_config")]
     pub config_json: String,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 fn default_status() -> String {
@@ -112,13 +115,40 @@ impl VaultStore {
             ));
         }
 
+        // Idempotency: if a key is provided and non-empty, return the existing vault
+        // for the same (manager_id, idempotency_key) pair.
+        let idempotency_key = req
+            .idempotency_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        if let Some(key) = idempotency_key {
+            let existing: Option<VaultRecord> = sqlx::query_as(
+                r#"
+                SELECT id, manager_id, name, status, config_json, version,
+                       idempotency_key, created_at, updated_at
+                FROM vaults
+                WHERE manager_id = ?1 AND idempotency_key = ?2
+                "#,
+            )
+            .bind(req.manager_id.trim())
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            if let Some(vault) = existing {
+                return Ok(vault);
+            }
+        }
+
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
 
         sqlx::query(
             r#"
-            INSERT INTO vaults (id, manager_id, name, status, config_json, version, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)
+            INSERT INTO vaults (id, manager_id, name, status, config_json, version, idempotency_key, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8)
             "#,
         )
         .bind(&id)
@@ -126,6 +156,7 @@ impl VaultStore {
         .bind(req.name.trim())
         .bind(req.status.trim())
         .bind(&req.config_json)
+        .bind(idempotency_key)
         .bind(now)
         .bind(now)
         .execute(&self.pool)
@@ -137,7 +168,8 @@ impl VaultStore {
     pub async fn get(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
         sqlx::query_as::<_, VaultRecord>(
             r#"
-            SELECT id, manager_id, name, status, config_json, version, created_at, updated_at
+            SELECT id, manager_id, name, status, config_json, version,
+                   idempotency_key, created_at, updated_at
             FROM vaults
             WHERE id = ?1
             "#,
@@ -299,6 +331,7 @@ mod tests {
                 status TEXT NOT NULL DEFAULT 'active',
                 config_json TEXT NOT NULL DEFAULT '{}',
                 version INTEGER NOT NULL DEFAULT 1,
+                idempotency_key TEXT,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -319,6 +352,7 @@ mod tests {
                 name: "Alpha".into(),
                 status: "active".into(),
                 config_json: "{}".into(),
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -339,6 +373,7 @@ mod tests {
                 name: "Alpha".into(),
                 status: "active".into(),
                 config_json: "{}".into(),
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -369,6 +404,7 @@ mod tests {
                 name: "Alpha".into(),
                 status: "active".into(),
                 config_json: "{}".into(),
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -420,6 +456,7 @@ mod tests {
                 name: "Race".into(),
                 status: "active".into(),
                 config_json: "{}".into(),
+                idempotency_key: None,
             })
             .await
             .unwrap();
@@ -482,5 +519,105 @@ mod tests {
         let final_vault = store.get(&id).await.unwrap();
         assert_eq!(final_vault.version, 1 + wins as i64);
         assert!(final_vault.name == "Writer-A" || final_vault.name == "Writer-B");
+    }
+
+    #[tokio::test]
+    async fn idempotency_key_returns_same_vault_on_duplicate() {
+        let store = test_store().await;
+        let req = CreateVaultRequest {
+            manager_id: "mgr-1".into(),
+            name: "Alpha".into(),
+            status: "active".into(),
+            config_json: "{}".into(),
+            idempotency_key: Some("key-abc".into()),
+        };
+
+        let first = store.create(&req).await.unwrap();
+        let second = store.create(&req).await.unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.name, second.name);
+
+        // Only one vault should exist for this manager.
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
+            .bind("mgr-1")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 1);
+    }
+
+    #[tokio::test]
+    async fn different_idempotency_keys_create_separate_vaults() {
+        let store = test_store().await;
+
+        let a = store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-1".into(),
+                name: "Alpha".into(),
+                status: "active".into(),
+                config_json: "{}".into(),
+                idempotency_key: Some("key-a".into()),
+            })
+            .await
+            .unwrap();
+
+        let b = store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-1".into(),
+                name: "Beta".into(),
+                status: "active".into(),
+                config_json: "{}".into(),
+                idempotency_key: Some("key-b".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_ne!(a.id, b.id);
+        assert_eq!(a.name, "Alpha");
+        assert_eq!(b.name, "Beta");
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
+            .bind("mgr-1")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 2);
+    }
+
+    #[tokio::test]
+    async fn create_without_idempotency_key_allows_duplicates() {
+        let store = test_store().await;
+
+        let a = store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-1".into(),
+                name: "Alpha".into(),
+                status: "active".into(),
+                config_json: "{}".into(),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        let b = store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-1".into(),
+                name: "Alpha".into(),
+                status: "active".into(),
+                config_json: "{}".into(),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        assert_ne!(a.id, b.id);
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
+            .bind("mgr-1")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 2);
     }
 }
