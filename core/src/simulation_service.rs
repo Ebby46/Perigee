@@ -97,6 +97,22 @@ impl SimulationService {
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(simulation_metric_id) REFERENCES simulation_metrics(id)
             );
+
+            CREATE TABLE IF NOT EXISTS webhook_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 8,
+                next_attempt_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_error TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_webhook_events_dispatch
+                ON webhook_events(status, next_attempt_at);
             ",
         )
         .map_err(|e| AppError::Internal(format!("Failed to create metrics schema: {e}")))?;
@@ -301,11 +317,229 @@ impl SimulationService {
             "outliers": outliers,
         });
 
-        let client = Client::new();
-        if let Err(err) = client.post(url).json(&payload).send().await {
-            eprintln!("[ALERT] Failed to send webhook notification: {err}");
+        // Persist the event *before* attempting delivery. Even if the
+        // process crashes right after this line, the event survives and
+        // will be picked up by the background dispatcher (or the next
+        // `dispatch_due_events` sweep) instead of being silently lost.
+        let event_id = match self.enqueue_webhook_event(url, &payload) {
+            Ok(id) => id,
+            Err(err) => {
+                eprintln!("[ALERT] Failed to persist webhook event, notification lost: {err}");
+                return;
+            }
+        };
+
+        // Best-effort immediate delivery so a healthy webhook endpoint
+        // still gets near-real-time notifications, rather than always
+        // waiting for the next poll cycle. If this fails, the event is
+        // already durably queued and `dispatch_due_events` will retry it
+        // with backoff.
+        if let Err(err) = self.deliver_event(event_id, url, &payload).await {
+            eprintln!(
+                "[ALERT] Immediate webhook delivery failed for event {event_id}, queued for retry: {err}"
+            );
         }
     }
+
+    /// Insert a webhook event into the durable queue. Returns the new
+    /// event's row id.
+    fn enqueue_webhook_event(
+        &self,
+        url: &str,
+        payload: &serde_json::Value,
+    ) -> Result<i64, AppError> {
+        let payload_json = serde_json::to_string(payload)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize webhook payload: {e}")))?;
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO webhook_events (url, payload_json, max_attempts) VALUES (?, ?, ?)",
+            params![url, payload_json, WEBHOOK_MAX_ATTEMPTS as i64],
+        )
+        .map_err(|e| AppError::Internal(format!("Failed to enqueue webhook event: {e}")))?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Attempt to deliver a single already-persisted event and update its
+    /// row accordingly: `delivered` on success, or rescheduled with
+    /// exponential backoff (eventually `dead_letter` after exhausting
+    /// `max_attempts`) on failure. The event is never deleted on failure,
+    /// so it always remains available for retry or manual inspection.
+    async fn deliver_event(
+        &self,
+        event_id: i64,
+        url: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let client = Client::new();
+        let result = client
+            .post(url)
+            .timeout(std::time::Duration::from_secs(WEBHOOK_TIMEOUT_SECS))
+            .json(payload)
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                if let Err(err) = self.mark_event_delivered(event_id) {
+                    eprintln!(
+                        "[ALERT] Delivered webhook event {event_id} but failed to update status: {err}"
+                    );
+                }
+                Ok(())
+            }
+            Ok(resp) => {
+                let err = format!("non-success status {}", resp.status());
+                self.reschedule_event(event_id, &err);
+                Err(err)
+            }
+            Err(err) => {
+                let err = err.to_string();
+                self.reschedule_event(event_id, &err);
+                Err(err)
+            }
+        }
+    }
+
+    fn mark_event_delivered(&self, event_id: i64) -> Result<(), AppError> {
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE webhook_events
+             SET status = 'delivered', updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?",
+            params![event_id],
+        )
+        .map_err(|e| AppError::Internal(format!("Failed to mark webhook event delivered: {e}")))?;
+        Ok(())
+    }
+
+    /// Bump the attempt count and either schedule the next retry with
+    /// exponential backoff, or mark the event `dead_letter` once
+    /// `max_attempts` is exhausted. Errors here are logged rather than
+    /// propagated since this already runs inside a failure path.
+    fn reschedule_event(&self, event_id: i64, error: &str) {
+        let conn = match self.connect() {
+            Ok(conn) => conn,
+            Err(err) => {
+                eprintln!("[ALERT] Failed to open database while rescheduling event {event_id}: {err}");
+                return;
+            }
+        };
+
+        let row: Result<(i64, i64), _> = conn.query_row(
+            "SELECT attempts, max_attempts FROM webhook_events WHERE id = ?",
+            params![event_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        );
+
+        let (attempts, max_attempts) = match row {
+            Ok(row) => row,
+            Err(err) => {
+                eprintln!("[ALERT] Failed to load webhook event {event_id} for reschedule: {err}");
+                return;
+            }
+        };
+
+        let attempts = attempts + 1;
+
+        let update_result = if attempts >= max_attempts {
+            conn.execute(
+                "UPDATE webhook_events
+                 SET attempts = ?, status = 'dead_letter', last_error = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?",
+                params![attempts, error, event_id],
+            )
+        } else {
+            let backoff_secs = webhook_backoff_secs(attempts);
+            conn.execute(
+                "UPDATE webhook_events
+                 SET attempts = ?, status = 'pending', last_error = ?,
+                     next_attempt_at = datetime(CURRENT_TIMESTAMP, ?),
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?",
+                params![attempts, error, format!("+{backoff_secs} seconds"), event_id],
+            )
+        };
+
+        if let Err(err) = update_result {
+            eprintln!("[ALERT] Failed to reschedule webhook event {event_id}: {err}");
+        }
+    }
+
+    /// Sweep the queue for events that are due (`pending` with
+    /// `next_attempt_at` in the past) and attempt delivery for each. Safe
+    /// to call repeatedly / from multiple places: delivered or still-future
+    /// events are simply skipped.
+    pub async fn dispatch_due_events(&self) -> Result<usize, AppError> {
+        let due = self.load_due_events()?;
+        let count = due.len();
+        for (event_id, url, payload_json) in due {
+            let payload: serde_json::Value = match serde_json::from_str(&payload_json) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    eprintln!(
+                        "[ALERT] Corrupt payload for webhook event {event_id}, marking dead_letter: {err}"
+                    );
+                    self.reschedule_event(event_id, &format!("corrupt payload: {err}"));
+                    continue;
+                }
+            };
+            let _ = self.deliver_event(event_id, &url, &payload).await;
+        }
+        Ok(count)
+    }
+
+    fn load_due_events(&self) -> Result<Vec<(i64, String, String)>, AppError> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, url, payload_json FROM webhook_events
+                 WHERE status = 'pending' AND next_attempt_at <= CURRENT_TIMESTAMP
+                 ORDER BY next_attempt_at ASC
+                 LIMIT ?",
+            )
+            .map_err(|e| AppError::Internal(format!("Failed to prepare due-events query: {e}")))?;
+
+        let rows = stmt
+            .query_map(params![WEBHOOK_DISPATCH_BATCH_SIZE as i64], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .map_err(|e| AppError::Internal(format!("Failed to query due webhook events: {e}")))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Internal(format!("Failed to read due webhook events: {e}")))
+    }
+
+    /// Spawn a background task that periodically sweeps the durable queue
+    /// and retries any events that are due. This is what makes retries
+    /// survive process restarts: on startup, any events left `pending`
+    /// from before a crash are picked up again on the very first sweep.
+    pub fn spawn_dispatcher(self: std::sync::Arc<Self>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(WEBHOOK_DISPATCH_POLL_SECS));
+            loop {
+                interval.tick().await;
+                if let Err(err) = self.dispatch_due_events().await {
+                    eprintln!("[ALERT] Webhook dispatcher sweep failed: {err}");
+                }
+            }
+        })
+    }
+}
+
+const WEBHOOK_MAX_ATTEMPTS: u32 = 8;
+const WEBHOOK_BASE_BACKOFF_SECS: u64 = 2;
+const WEBHOOK_MAX_BACKOFF_SECS: u64 = 300;
+const WEBHOOK_TIMEOUT_SECS: u64 = 10;
+const WEBHOOK_DISPATCH_BATCH_SIZE: usize = 25;
+const WEBHOOK_DISPATCH_POLL_SECS: u64 = 15;
+
+/// Exponential backoff, capped, for the given (1-indexed) attempt number.
+fn webhook_backoff_secs(attempt: i64) -> u64 {
+    let exp = attempt.max(1) as u32 - 1;
+    WEBHOOK_BASE_BACKOFF_SECS
+        .saturating_mul(1u64.wrapping_shl(exp.min(20)))
+        .min(WEBHOOK_MAX_BACKOFF_SECS)
 }
 
 fn assess_metric_shift(
@@ -413,6 +647,30 @@ mod tests {
         .expect("count alerts") as usize
     }
 
+    fn webhook_event_count(db_path: &Path) -> usize {
+        let conn = Connection::open(db_path).expect("open sqlite database");
+        conn.query_row("SELECT COUNT(*) FROM webhook_events", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("count webhook events") as usize
+    }
+
+    fn webhook_event_row(db_path: &Path, id: i64) -> (String, i64, i64) {
+        let conn = Connection::open(db_path).expect("open sqlite database");
+        conn.query_row(
+            "SELECT status, attempts, max_attempts FROM webhook_events WHERE id = ?",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .expect("load webhook event")
+    }
+
     #[tokio::test]
     async fn first_sample_has_no_historical_baseline() {
         let db_path = TempDbPath::new("first_sample_has_no_historical_baseline");
@@ -506,5 +764,105 @@ mod tests {
             .map(|z| z.abs() > DEFAULT_ZSCORE_THRESHOLD)
             .unwrap_or(false));
         assert_eq!(alert_count(&db_path.0), 1);
+    }
+
+    #[tokio::test]
+    async fn alert_durably_queues_webhook_event_even_when_delivery_fails() {
+        // Nothing is listening on port 1, so delivery is guaranteed to fail
+        // fast (connection refused) without needing a timeout.
+        let db_path = TempDbPath::new("alert_durably_queues_webhook_event");
+        let service = SimulationService::new(
+            &db_path.0,
+            Some("http://127.0.0.1:1/unreachable".to_string()),
+        )
+        .expect("initialize simulation service");
+
+        service
+            .record_and_analyze(metric("token", "mint", "hash-a", 100, 200, 300))
+            .await
+            .expect("seed metric should succeed");
+
+        let result = service
+            .record_and_analyze(metric("token", "mint", "hash-a", 130, 250, 400))
+            .await
+            .expect("second metric should succeed");
+
+        assert!(result.alert_triggered);
+
+        // The event must survive in the durable queue even though the
+        // immediate delivery attempt failed - this is the core of the fix:
+        // previously a failed send just logged to stderr and the
+        // notification was gone for good.
+        assert_eq!(webhook_event_count(&db_path.0), 1);
+        let (status, attempts, _max_attempts) = webhook_event_row(&db_path.0, 1);
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_due_events_moves_event_to_dead_letter_after_max_attempts() {
+        let db_path = TempDbPath::new("dispatch_due_events_dead_letters");
+        let service =
+            SimulationService::new(&db_path.0, None).expect("initialize simulation service");
+
+        // Seed an overdue pending event directly, with max_attempts = 1 so
+        // the very next failed attempt exhausts its retry budget.
+        {
+            let conn = Connection::open(&db_path.0).expect("open sqlite database");
+            conn.execute(
+                "INSERT INTO webhook_events
+                     (url, payload_json, status, attempts, max_attempts, next_attempt_at)
+                 VALUES (?, '{}', 'pending', 0, 1, datetime('now', '-1 minute'))",
+                params!["http://127.0.0.1:1/unreachable"],
+            )
+            .expect("seed webhook event");
+        }
+
+        let dispatched = service
+            .dispatch_due_events()
+            .await
+            .expect("dispatch sweep should succeed");
+        assert_eq!(dispatched, 1);
+
+        let (status, attempts, max_attempts) = webhook_event_row(&db_path.0, 1);
+        assert_eq!(status, "dead_letter");
+        assert_eq!(attempts, 1);
+        assert_eq!(max_attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_due_events_skips_events_not_yet_due() {
+        let db_path = TempDbPath::new("dispatch_due_events_skips_future");
+        let service =
+            SimulationService::new(&db_path.0, None).expect("initialize simulation service");
+
+        {
+            let conn = Connection::open(&db_path.0).expect("open sqlite database");
+            conn.execute(
+                "INSERT INTO webhook_events
+                     (url, payload_json, status, attempts, max_attempts, next_attempt_at)
+                 VALUES (?, '{}', 'pending', 1, 8, datetime('now', '+1 hour'))",
+                params!["http://127.0.0.1:1/unreachable"],
+            )
+            .expect("seed webhook event");
+        }
+
+        let dispatched = service
+            .dispatch_due_events()
+            .await
+            .expect("dispatch sweep should succeed");
+        assert_eq!(dispatched, 0);
+
+        let (status, attempts, _max_attempts) = webhook_event_row(&db_path.0, 1);
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn webhook_backoff_secs_grows_exponentially_and_caps() {
+        assert_eq!(webhook_backoff_secs(1), 2);
+        assert_eq!(webhook_backoff_secs(2), 4);
+        assert_eq!(webhook_backoff_secs(3), 8);
+        assert_eq!(webhook_backoff_secs(20), WEBHOOK_MAX_BACKOFF_SECS);
     }
 }
