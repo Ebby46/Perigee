@@ -92,7 +92,15 @@ export default function Home() {
               <h1 className="text-2xl font-bold text-cyan-400">Perigee</h1>
               <p className="text-sm text-slate-400">Soroban analysis workspace</p>
             </div>
-            <ConnectButton />
+            <div className="flex items-center gap-4">
+              <a
+                href="/managers/onboarding"
+                className="text-sm text-slate-400 hover:text-cyan-400 transition-colors"
+              >
+                Become a Manager
+              </a>
+              <ConnectButton />
+            </div>
           </div>
         </header>
 

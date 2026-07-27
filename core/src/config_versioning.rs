@@ -43,6 +43,7 @@ impl TriggerConfigVersioner {
             .iter()
             .filter(|c| c.created_at <= time)
             .last()
+        configs.iter().filter(|c| c.created_at <= time).last()
     }
 
     pub fn snapshot_for_vault(

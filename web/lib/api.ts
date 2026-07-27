@@ -253,6 +253,60 @@ export interface AnalyzeWasmRequest {
   enable_experimental?: boolean;
 }
 
+// ── Manager onboarding types (API-33) ──────────────────────────────────────
+
+export interface RegisterManagerRequest {
+  stellar_address: string;
+  name: string;
+  email?: string;
+  kyc_document_ref?: string;
+}
+
+export interface ManagerRecord {
+  id: string;
+  stellar_address: string;
+  name: string;
+  email: string;
+  status: string;
+  kyc_document_ref: string;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ManagerStatusResponse {
+  id: string;
+  status: string;
+  message: string;
+}
+
+export const managerService = {
+  async register(req: RegisterManagerRequest): Promise<ManagerRecord> {
+    return apiClient.post<ManagerRecord>("/managers/register", req);
+  },
+
+  async list(status?: string): Promise<ManagerRecord[]> {
+    const params = status ? { status } : undefined;
+    return apiClient.get<ManagerRecord[]>("/managers", { params });
+  },
+
+  async get(id: string): Promise<ManagerRecord> {
+    return apiClient.get<ManagerRecord>(`/managers/${id}`);
+  },
+
+  async approve(id: string, notes = ""): Promise<ManagerRecord> {
+    return apiClient.post<ManagerRecord>(`/managers/${id}/approve`, { notes });
+  },
+
+  async reject(id: string, notes = ""): Promise<ManagerRecord> {
+    return apiClient.post<ManagerRecord>(`/managers/${id}/reject`, { notes });
+  },
+
+  async checkStatus(stellarAddress: string): Promise<ManagerStatusResponse> {
+    return apiClient.get<ManagerStatusResponse>(`/managers/status/${stellarAddress}`);
+  },
+};
+
 export const analyzeService = {
   async analyze(req: AnalyzeRequest, token?: string): Promise<AnalyzeResponse> {
     const validatedRequest = await validateAnalyzeRequest(req);

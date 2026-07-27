@@ -297,6 +297,36 @@ impl TransactionFeeRecord {
     }
 }
 
+// ---------------------------------------------------------------------------
+// UnclaimedFeeCap — cap on accumulated unclaimed fees (Issue #62)
+// ---------------------------------------------------------------------------
+
+pub struct UnclaimedFeeCap {
+    pub max_unclaimed: i64,
+    pub sweep_interval_ledgers: i64,
+}
+
+impl Default for UnclaimedFeeCap {
+    fn default() -> Self {
+        Self {
+            max_unclaimed: 1_000_000_000, // 100 XLM in stroops
+            sweep_interval_ledgers: 1000,
+        }
+    }
+}
+
+pub fn needs_sweep(unclaimed: i64, cap: &UnclaimedFeeCap) -> bool {
+    unclaimed >= cap.max_unclaimed
+}
+
+pub fn calculate_sweep_amount(unclaimed: i64, cap: &UnclaimedFeeCap) -> i64 {
+    if unclaimed > cap.max_unclaimed {
+        unclaimed - cap.max_unclaimed
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +339,15 @@ mod tests {
         assert_eq!(record.tx_hash, "abc123");
         assert_eq!(record.fee_bid, 100);
         assert!(!record.id.is_empty());
+    }
+
+    #[test]
+    fn test_unclaimed_fee_cap() {
+        let cap = UnclaimedFeeCap::default();
+        assert!(!needs_sweep(500_000_000, &cap));
+        assert!(needs_sweep(1_000_000_000, &cap));
+        assert!(needs_sweep(1_500_000_000, &cap));
+        assert_eq!(calculate_sweep_amount(500_000_000, &cap), 0);
+        assert_eq!(calculate_sweep_amount(1_500_000_000, &cap), 500_000_000);
     }
 }
