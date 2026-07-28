@@ -26,6 +26,8 @@ async function initAxe() {
     await axe.default(React.default, ReactDOM.default, 1000);
   }
 }
+import { RpcFallbackBanner } from "../components/RpcFallbackBanner";
+import { API_URL } from "../lib/api";
 
 export default function App({ Component, pageProps }: AppProps) {
   useEffect(() => {
@@ -39,6 +41,8 @@ export default function App({ Component, pageProps }: AppProps) {
     <WalletProvider>
       {/* Network status and API availability (#109) */}
       <NetworkStatusBanner apiUrl={API_URL} />
+      {/* Graceful RPC fallback — shown when the backend is unreachable (#115) */}
+      <RpcFallbackBanner apiUrl={API_URL} />
       <ErrorBoundary>
         <Component {...pageProps} />
         <Analytics />
