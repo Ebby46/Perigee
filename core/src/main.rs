@@ -1813,6 +1813,14 @@ async fn main() {
             let webhook_url = env::var("Perigee_ALERT_WEBHOOK_URL").ok();
             let simulation_service = SimulationService::new(db_path, webhook_url)
                 .expect("initialize simulation service");
+            // Catch up on any webhook events left pending/retrying from a
+            // previous run (e.g. the process crashed or was killed mid
+            // backoff) before generating new alerts. This is what makes
+            // delivery durable across restarts rather than just within a
+            // single process's retry loop.
+            if let Err(e) = simulation_service.dispatch_due_events().await {
+                tracing::warn!("Failed to drain pending webhook events: {}", e);
+            }
             if let Err(e) = benchmarks::run_token_benchmark(path, &simulation_service).await {
                 tracing::error!("Benchmark failed: {}", e);
             }
