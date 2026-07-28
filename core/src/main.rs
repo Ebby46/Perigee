@@ -278,6 +278,80 @@ fn build_cors_layer(cors_allowed_origins: &str) -> CorsLayer {
     base.allow_origin(AllowOrigin::list(origins))
 }
 
+/// Validate RPC / relayer / network secret URLs at startup so a malformed
+/// value fails fast and loudly rather than silently at first request.
+///
+/// Returns `Err(message)` describing exactly which environment variable is
+/// problematic so an operator can fix it without spelunking through logs.
+/// Issue #85 / NF-03 — "Secrets for RPC/relayer loaded from env without validation".
+fn validate_config_secrets(config: &AppConfig) -> Result<(), String> {
+    // 1. Primary RPC URL (always required, has a default from `load_config`).
+    let rpc = config.soroban_rpc_url.trim();
+    if rpc.is_empty() {
+        return Err("SOROBAN_RPC_URL is empty".to_string());
+    }
+    if reqwest::Url::parse(rpc).is_err() {
+        return Err(format!(
+            "SOROBAN_RPC_URL is not a valid URL: '{}' \
+             (must start with http:// or https://)",
+            rpc
+        ));
+    }
+
+    // 2. Stellar network passphrase — never empty.
+    if config.network_passphrase.trim().is_empty() {
+        return Err("NETWORK_PASSPHRASE must not be empty".to_string());
+    }
+
+    // 3. RPC_PROVIDERS — if set, must be valid JSON with valid URLs.
+    if !config.rpc_providers.trim().is_empty() {
+        let providers: Vec<RpcProvider> =
+            serde_json::from_str(&config.rpc_providers).map_err(|e| {
+                format!(
+                    "RPC_PROVIDERS is not valid JSON: {} \
+                     — expected a JSON array of {{name,url,auth_header?,auth_value?}} objects",
+                    e
+                )
+            })?;
+        for (idx, p) in providers.iter().enumerate() {
+            if p.name.trim().is_empty() {
+                return Err(format!(
+                    "RPC_PROVIDERS[{}].name must not be empty",
+                    idx
+                ));
+            }
+            if reqwest::Url::parse(&p.url).is_err() {
+                return Err(format!(
+                    "RPC_PROVIDERS[{}] ('{}') has invalid URL: '{}'",
+                    idx, p.name, p.url
+                ));
+            }
+        }
+    }
+
+    // 4. REGISTRY_PUBLIC_URL — optional but, if set, must be a valid URL.
+    if !config.registry_public_url.trim().is_empty() {
+        if reqwest::Url::parse(&config.registry_public_url).is_err() {
+            return Err(format!(
+                "REGISTRY_PUBLIC_URL is not a valid URL: '{}'",
+                config.registry_public_url
+            ));
+        }
+    }
+
+    // 5. REGISTRY_SEED_PEERS — every URL must be parseable.
+    for peer in parse_seed_peers(&config.registry_seed_peers) {
+        if reqwest::Url::parse(&peer).is_err() {
+            return Err(format!(
+                "REGISTRY_SEED_PEERS contains an invalid peer URL: '{}'",
+                peer
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn load_config() -> Result<AppConfig, ConfigError> {
     dotenvy::dotenv().ok();
 
@@ -1782,6 +1856,14 @@ async fn main() {
     tracing::info!("Perigee Starting...");
 
     let config = load_config().expect("Failed to load configuration");
+    // Fail fast on malformed secrets before the server binds (issue #85 / NF-03).
+    if let Err(err) = validate_config_secrets(&config) {
+        tracing::error!(
+            error = %err,
+            "Configuration validation failed at startup. Refusing to bind."
+        );
+        panic!("Invalid configuration: {}", err);
+    }
     tracing::info!("Perigee initialized with config: {:?}", config);
     tracing::info!(
         redis_url = %config.redis_url,
@@ -2818,4 +2900,142 @@ async fn analyze_simulation(
 ) -> Result<Json<AnalysisResult>, AppError> {
     let result = simulation_service.record_and_analyze(metric).await?;
     Ok(Json(result))
+}
+
+// ── Unit tests for validate_config_secrets (#85 / NF-03) ────────────────────
+
+#[cfg(test)]
+mod validate_config_secrets_tests {
+    use super::*;
+
+    /// Build a baseline config whose secrets are *valid* so each test only
+    /// invalidates one field at a time.
+    fn good_config() -> AppConfig {
+        AppConfig {
+            app_env: "test".to_string(),
+            server_port: 8080,
+            rust_log: "info".to_string(),
+            soroban_rpc_url: "https://soroban-testnet.stellar.org".to_string(),
+            jwt_private_key: None,
+            network_passphrase: "Test SDF Network ; September 2015".to_string(),
+            redis_url: String::new(),
+            rpc_providers: String::new(),
+            registry_instance_id: String::new(),
+            registry_public_url: String::new(),
+            registry_seed_peers: String::new(),
+            health_check_interval_secs: 30,
+            gossip_interval_secs: 30,
+            simulation_timeout_secs: 30,
+            simulation_mode: "failover".to_string(),
+            database_url: "sqlite://Perigee.db".to_string(),
+            job_timeout_secs: 300,
+            max_concurrent_jobs: 10,
+            fee_collection_interval_secs: 5,
+            fee_retention_days: 30,
+            fee_analysis_enabled: true,
+            emergency_verification_paused: false,
+            disk_cache_path: String::new(),
+            max_ledger_age: 100,
+            cors_allowed_origins: String::new(),
+        }
+    }
+
+    #[test]
+    fn accepts_well_formed_config() {
+        let cfg = good_config();
+        assert!(validate_config_secrets(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_soroban_rpc_url() {
+        let mut cfg = good_config();
+        cfg.soroban_rpc_url = "".to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("SOROBAN_RPC_URL"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_malformed_soroban_rpc_url() {
+        let mut cfg = good_config();
+        cfg.soroban_rpc_url = "not-a-url".to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("SOROBAN_RPC_URL"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_empty_network_passphrase() {
+        let mut cfg = good_config();
+        cfg.network_passphrase = "   ".to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("NETWORK_PASSPHRASE"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn accepts_rpc_providers_with_valid_urls() {
+        let mut cfg = good_config();
+        cfg.rpc_providers = serde_json::json!([
+            {"name": "stellar-testnet", "url": "https://soroban-testnet.stellar.org"},
+        ])
+        .to_string();
+        assert!(validate_config_secrets(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_rpc_providers_json() {
+        let mut cfg = good_config();
+        cfg.rpc_providers = "{not json".to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("RPC_PROVIDERS"), "unexpected error: {err}");
+        assert!(err.contains("JSON"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_rpc_provider_with_invalid_url() {
+        let mut cfg = good_config();
+        cfg.rpc_providers = serde_json::json!([
+            {"name": "broken", "url": "definitely-not-a-url"},
+        ])
+        .to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("RPC_PROVIDERS"), "unexpected error: {err}");
+        assert!(err.contains("broken"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_rpc_provider_with_empty_name() {
+        let mut cfg = good_config();
+        cfg.rpc_providers = serde_json::json!([
+            {"name": "", "url": "https://example.com"},
+        ])
+        .to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("name must not be empty"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_invalid_registry_public_url() {
+        let mut cfg = good_config();
+        cfg.registry_public_url = "just-a-string".to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("REGISTRY_PUBLIC_URL"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_invalid_seed_peer_urls() {
+        let mut cfg = good_config();
+        // parse_seed_peers accepts comma-separated values too.
+        cfg.registry_seed_peers = "https://peer-a.example.com,not-a-url".to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("REGISTRY_SEED_PEERS"), "unexpected error: {err}");
+        assert!(err.contains("not-a-url"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn accepts_valid_seed_peer_json_array() {
+        let mut cfg = good_config();
+        cfg.registry_seed_peers =
+            serde_json::json!(["https://peer-a.example.com", "https://peer-b.example.com"])
+                .to_string();
+        assert!(validate_config_secrets(&cfg).is_ok());
+    }
 }

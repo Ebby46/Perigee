@@ -20,7 +20,43 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        // WCAG AA contrast overrides (WEB-59, #192)
+        // ──────────────────────────────────────────────────────────────
+        // Design tokens (WEB-19, #105)
+        //
+        // Semantic tokens below are sourced from CSS custom properties
+        // declared in `web/styles/variables.css` under `:root`. Using
+        // `var(--token, <fallback>)` keeps every utility class (`bg-primary`,
+        // `text-foreground`, `border-border`, …) reactive to a single
+        // rebrand: just change the value in `variables.css`.
+        //
+        // Numeric RGB channels (`<token>-rgb`) are also exposed so future
+        // alpha utilities (`bg-primary/40`) can be added without touching
+        // this file.
+        // ──────────────────────────────────────────────────────────────
+        primary: {
+          DEFAULT: "var(--color-primary, #2563eb)",
+          hover: "var(--color-primary-hover, #1d4ed8)",
+          rgb: "37 99 235",
+        },
+        secondary: {
+          DEFAULT: "var(--color-secondary, #64748b)",
+          hover: "var(--color-secondary-hover, #475569)",
+        },
+        success: "var(--color-success, #16a34a)",
+        warning: "var(--color-warning, #f59e0b)",
+        danger:  "var(--color-danger,  #dc2626)",
+        canvas:  "var(--color-background, #ffffff)",
+        surface: "var(--color-surface,    #f8fafc)",
+        line: {
+          DEFAULT: "var(--color-border, #e2e8f0)",
+          subtle:  "var(--color-border-subtle, #e2e8f0)",
+        },
+        body: {
+          DEFAULT: "var(--color-text,       #0f172a)",
+          muted:   "var(--color-text-muted, #64748b)",
+        },
+
+        // ── Existing WCAG-AA contrast overrides — preserved from WEB-59 (#192).
         // All values below target dark backgrounds (slate-950 / slate-900).
         // Minimum required contrast ratio: 4.5:1 normal text, 3:1 large text.
         slate: {
@@ -49,11 +85,31 @@ module.exports = {
       },
       spacing: {
         120: "30rem",
+        // Brand-aligned spacing tokens sourced from CSS vars.
+        "section":   "var(--space-section,   4rem)",
+        "component": "var(--space-component, 1.5rem)",
       },
       borderRadius: {
         "4xl": "2rem",
         "s-2xl": "1rem 0 0 1rem",
         "e-2xl": "0 1rem 1rem 0",
+        // Brand-aligned radius tokens sourced from CSS vars.
+        // Namespaced under `card-*` / `pill` so they do NOT shadow Tailwind's
+        // built-in `sm` / `md` / `lg` / `xl` / `full` keys (a regression
+        // caught by code-review for #105). Use as `rounded-card-sm`,
+        // `rounded-pill`, etc.
+        "card-sm": "var(--radius-sm, 6px)",
+        "card-md": "var(--radius-md, 10px)",
+        "card-lg": "var(--radius-lg, 14px)",
+        "card-xl": "var(--radius-xl, 18px)",
+        "pill":    "var(--radius-full, 9999px)",
+      },
+      boxShadow: {
+        // Namespaced under `card-*` to avoid shadowing Tailwind's built-in
+        // `sm` / `md` / `lg`. Use as `shadow-card-sm`, etc.
+        "card-sm": "var(--shadow-sm, 0 1px 2px rgba(0,0,0,.05))",
+        "card-md": "var(--shadow-md, 0 4px 12px rgba(0,0,0,.08))",
+        "card-lg": "var(--shadow-lg, 0 10px 24px rgba(0,0,0,.12))",
       },
     },
   },
