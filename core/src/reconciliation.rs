@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::db;
 use crate::fee_analytics::FeeAnalyticsEngine;
 use crate::fee_store::FeeStore;
 use crate::jobs::{JobId, JobQueue};
@@ -11,7 +12,6 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 use std::sync::Arc;
 use utoipa::ToSchema;
 
@@ -101,15 +101,15 @@ fn default_limit() -> i64 {
 pub struct FeeReconciler {
     store: Arc<FeeStore>,
     analytics: FeeAnalyticsEngine,
-    pool: SqlitePool,
+    reports: db::reconciliation::ReconciliationRepo,
 }
 
 impl FeeReconciler {
-    pub fn new(store: Arc<FeeStore>, pool: SqlitePool) -> Self {
+    pub fn new(store: Arc<FeeStore>, reports: db::reconciliation::ReconciliationRepo) -> Self {
         Self {
             store,
             analytics: FeeAnalyticsEngine::new(),
-            pool,
+            reports,
         }
     }
 
@@ -289,53 +289,10 @@ impl FeeReconciler {
         report: &ReconciliationReport,
         discrepancies: &[Discrepancy],
     ) -> Result<(), ReconciliationError> {
-        let summary_json =
-            serde_json::to_value(&report.summary).unwrap_or_default();
-
-        sqlx::query(
-            r#"
-            INSERT INTO reconciliation_reports (
-                id, from_ledger, to_ledger, tolerance_pct,
-                total_ledgers, discrepancies_count, avg_delta_pct,
-                max_delta_pct, summary, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            "#,
-        )
-        .bind(&report.id)
-        .bind(report.from_ledger)
-        .bind(report.to_ledger)
-        .bind(report.tolerance_pct)
-        .bind(report.total_ledgers)
-        .bind(report.discrepancies_count)
-        .bind(report.avg_delta_pct)
-        .bind(report.max_delta_pct)
-        .bind(&summary_json)
-        .bind(&report.created_at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ReconciliationError::StoreError(e.to_string()))?;
-
-        for disc in discrepancies {
-            sqlx::query(
-                r#"
-                INSERT INTO reconciliation_discrepancies (
-                    id, report_id, ledger_sequence, expected_fee,
-                    actual_fee, delta, delta_pct, severity
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                "#,
-            )
-            .bind(&disc.id)
-            .bind(&disc.report_id)
-            .bind(disc.ledger_sequence)
-            .bind(disc.expected_fee)
-            .bind(disc.actual_fee)
-            .bind(disc.delta)
-            .bind(disc.delta_pct)
-            .bind(&disc.severity)
-            .execute(&self.pool)
+        self.reports
+            .persist_report(report, discrepancies)
             .await
             .map_err(|e| ReconciliationError::StoreError(e.to_string()))?;
-        }
 
         Ok(())
     }
@@ -464,51 +421,6 @@ pub async fn list_reports_handler(
     State(state): State<Arc<crate::AppState>>,
     Query(params): Query<ListReportsQuery>,
 ) -> Result<Json<Vec<ReconciliationReport>>, AppError> {
-    let pool = &state.reconciler_pool;
-
-    let rows = sqlx::query_as::<_, ReportRow>(
-        "SELECT * FROM reconciliation_reports ORDER BY created_at DESC LIMIT ?1",
-    )
-    .bind(params.limit)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    let reports: Vec<ReconciliationReport> = rows.into_iter().map(|r| r.into_report()).collect();
+    let reports = state.reconciliation_repo.list(params.limit).await?;
     Ok(Json(reports))
-}
-
-/// Raw DB row for deserialization
-#[derive(Debug, sqlx::FromRow)]
-struct ReportRow {
-    id: String,
-    from_ledger: i64,
-    to_ledger: i64,
-    tolerance_pct: f64,
-    total_ledgers: i32,
-    discrepancies_count: i32,
-    avg_delta_pct: f64,
-    max_delta_pct: f64,
-    summary: Option<serde_json::Value>,
-    created_at: String,
-}
-
-impl ReportRow {
-    fn into_report(self) -> ReconciliationReport {
-        let summary: Option<ReconciliationSummary> =
-            self.summary.and_then(|v| serde_json::from_value(v).ok());
-
-        ReconciliationReport {
-            id: self.id,
-            from_ledger: self.from_ledger,
-            to_ledger: self.to_ledger,
-            tolerance_pct: self.tolerance_pct,
-            total_ledgers: self.total_ledgers,
-            discrepancies_count: self.discrepancies_count,
-            avg_delta_pct: self.avg_delta_pct,
-            max_delta_pct: self.max_delta_pct,
-            summary,
-            created_at: self.created_at,
-        }
-    }
 }

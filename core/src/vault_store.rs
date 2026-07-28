@@ -5,13 +5,13 @@
 //! otherwise the caller gets a conflict and must reload.
 
 use crate::errors::AppError;
+use crate::db;
 use axum::{
     extract::{Path, State},
     Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
 use std::sync::Arc;
 use thiserror::Error;
 use utoipa::ToSchema;
@@ -52,7 +52,7 @@ impl From<VaultStoreError> for AppError {
 }
 
 /// Persisted vault record. `version` is the optimistic-lock token.
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct VaultRecord {
     pub id: String,
     pub manager_id: String,
@@ -65,7 +65,7 @@ pub struct VaultRecord {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateVaultRequest {
     pub manager_id: String,
     pub name: String,
@@ -85,7 +85,7 @@ fn default_config() -> String {
     "{}".to_string()
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateVaultRequest {
     /// Required optimistic-lock version from the last GET/create response.
     pub version: i64,
@@ -95,12 +95,12 @@ pub struct UpdateVaultRequest {
 }
 
 pub struct VaultStore {
-    pool: SqlitePool,
+    vaults: db::schema::VaultsTable,
 }
 
 impl VaultStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(vaults: db::schema::VaultsTable) -> Self {
+        Self { vaults }
     }
 
     pub async fn create(&self, req: &CreateVaultRequest) -> Result<VaultRecord, VaultStoreError> {
@@ -124,66 +124,42 @@ impl VaultStore {
             .filter(|s| !s.is_empty());
 
         if let Some(key) = idempotency_key {
-            let existing: Option<VaultRecord> = sqlx::query_as(
-                r#"
-                SELECT id, manager_id, name, status, config_json, version,
-                       idempotency_key, created_at, updated_at
-                FROM vaults
-                WHERE manager_id = ?1 AND idempotency_key = ?2
-                "#,
-            )
-            .bind(req.manager_id.trim())
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await?;
-
-            if let Some(vault) = existing {
+            if let Some(vault) = self
+                .vaults
+                .find_by_idempotency_key(req.manager_id.trim(), key)
+                .await
+                .map_err(VaultStoreError::Database)?
+            {
                 return Ok(vault);
             }
         }
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
+        let manager_id = req.manager_id.trim();
+        let name = req.name.trim();
+        let status = req.status.trim();
+        let config_json = req.config_json.trim();
 
-        sqlx::query(
-            r#"
-            INSERT INTO vaults (id, manager_id, name, status, config_json, version, idempotency_key, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8)
-            "#,
-        )
-        .bind(&id)
-        .bind(req.manager_id.trim())
-        .bind(req.name.trim())
-        .bind(req.status.trim())
-        .bind(&req.config_json)
-        .bind(idempotency_key)
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-
-        self.get(&id).await
+        self.vaults
+            .insert(&id, manager_id, name, status, config_json, idempotency_key, now)
+            .await
+            .map_err(VaultStoreError::Database)
     }
 
     pub async fn get(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
-        sqlx::query_as::<_, VaultRecord>(
-            r#"
-            SELECT id, manager_id, name, status, config_json, version,
-                   idempotency_key, created_at, updated_at
-            FROM vaults
-            WHERE id = ?1
-            "#,
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| VaultStoreError::NotFound(id.to_string()))
+        self.vaults
+            .find_by_id(id)
+            .await
+            .map_err(VaultStoreError::Database)?
+            .ok_or_else(|| VaultStoreError::NotFound(id.to_string()))
     }
 
     /// Apply an update inside a transaction using optimistic locking.
     ///
-    /// `UPDATE … WHERE id = ? AND version = ?` guarantees only one concurrent
-    /// writer succeeds for a given version snapshot.
+    /// The typed schema's update method uses `WHERE id = ? AND version = ?`
+    /// to guarantee only one concurrent writer succeeds for a given version
+    /// snapshot.
     pub async fn update(
         &self,
         id: &str,
@@ -195,58 +171,27 @@ impl VaultStore {
             ));
         }
 
-        let mut tx = self.pool.begin().await?;
-
-        // Ensure the row exists before attempting the CAS update.
-        let exists: Option<(String,)> =
-            sqlx::query_as(r#"SELECT id FROM vaults WHERE id = ?1"#)
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        if exists.is_none() {
-            return Err(VaultStoreError::NotFound(id.to_string()));
-        }
-
         let name = req.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let status = req
-            .status
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
+        let status = req.status.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let config_json = req.config_json.as_deref();
         let now = Utc::now();
 
-        // Single atomic CAS: bump version only when the expected version still matches.
-        let result = sqlx::query(
-            r#"
-            UPDATE vaults
-            SET name = COALESCE(?1, name),
-                status = COALESCE(?2, status),
-                config_json = COALESCE(?3, config_json),
-                version = version + 1,
-                updated_at = ?4
-            WHERE id = ?5 AND version = ?6
-            "#,
-        )
-        .bind(name)
-        .bind(status)
-        .bind(config_json)
-        .bind(now)
-        .bind(id)
-        .bind(req.version)
-        .execute(&mut *tx)
-        .await?;
-
-        if result.rows_affected() != 1 {
-            return Err(VaultStoreError::Conflict {
-                vault_id: id.to_string(),
-                expected_version: req.version,
-            });
-        }
-
-        tx.commit().await?;
-
-        self.get(id).await
+        self.vaults
+            .update(id, req.version, name, status, config_json, now)
+            .await
+            .map_err(|e| match e {
+                sqlx::Error::RowNotFound => VaultStoreError::NotFound(id.to_string()),
+                sqlx::Error::Database(db_err) => {
+                    if db_err.message().contains("UNIQUE") {
+                        VaultStoreError::InvalidData(
+                            "A vault with this idempotency key already exists".into(),
+                        )
+                    } else {
+                        VaultStoreError::Database(e)
+                    }
+                }
+                other => VaultStoreError::Database(other),
+            })
     }
 }
 

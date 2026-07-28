@@ -30,6 +30,7 @@ mod ws;
 
 use crate::cache::{ContractCache, SimulationCache};
 use crate::comparison::{CompareMode, RegressionFlag, RegressionReport, ResourceDelta};
+use crate::db;
 use crate::errors::AppError;
 use crate::merkle_tree::MerkleTree;
 use axum::{
@@ -488,9 +489,9 @@ pub struct AppState {
     simulation_bus: Arc<SimulationBus>,
     /// Fee reconciler for async reconciliation jobs
     #[allow(dead_code)]
-    reconciler: Arc<FeeReconciler>,
-    /// SQLite pool for reconciliation queries
-    reconciler_pool: sqlx::SqlitePool,
+    reconciler: Arc<reconciliation::FeeReconciler>,
+    /// Typed DB store for reconciliation queries
+    reconciliation_repo: db::reconciliation::ReconciliationRepo,
     /// White-label vault records with optimistic locking (API-37).
     vault_store: Arc<vault_store::VaultStore>,
     /// Manager onboarding with approval/KYC gate (API-33).
@@ -2215,11 +2216,22 @@ async fn main() {
 
     tracing::info!("Database migrations completed");
 
+    // Initialize typed DB schema for the managers, vaults, and reconciliation records.
+    let db_schema = db::schema::TypedSchema::new(std::sync::Arc::new(db_pool.clone()));
+
     let fee_store = Arc::new(FeeStore::new(db_pool.clone()));
-    let vault_store = Arc::new(vault_store::VaultStore::new(db_pool.clone()));
-    let manager_store = Arc::new(manager_store::ManagerStore::new(db_pool.clone()));
+    let vault_store = Arc::new(vault_store::VaultStore::new(db_schema.vaults()));
+    let manager_store = Arc::new(manager_store::ManagerStore::new(db_schema.managers()));
     let fee_analytics_engine = FeeAnalyticsEngine::new();
-    let reconciler = Arc::new(FeeReconciler::new(Arc::clone(&fee_store), db_pool.clone()));
+
+    let reconciliation_repo = db::reconciliation::ReconciliationRepo::new(
+        db_schema.reconciliation_reports(),
+        db_schema.reconciliation_discrepancies(),
+    );
+    let reconciler = Arc::new(reconciliation::FeeReconciler::new(
+        Arc::clone(&fee_store),
+        reconciliation_repo.clone(),
+    ));
     // API-28: business-logic service owns fee / billing math; wired into
     // AppState so the HTTP handlers stay thin.
     let fee_service = billing_service::FeeService::new(
@@ -2350,7 +2362,7 @@ async fn main() {
         metrics: Arc::new(AppMetrics::new().expect("Failed to initialize Prometheus metrics")),
         simulation_bus,
         reconciler,
-        reconciler_pool: db_pool.clone(),
+        reconciliation_repo,
         vault_store,
         manager_store,
     });
