@@ -1,20 +1,22 @@
 import { CreateVaultSchema, MAX_MARKUP_BPS } from './create-vault.dto';
 
 describe('CreateVaultSchema', () => {
-  // Test case for a perfectly valid request body
+  const validManagerId = '550e8400-e29b-41d4-a716-446655440000';
+
   it('should validate a correct payload successfully', () => {
     const validPayload = {
-      clientName: 'Test Client',
-      markupBps: 100, // 1% markup
+      managerId: validManagerId,
+      name: 'Test Client',
+      markupBps: 100,
     };
     const result = CreateVaultSchema.safeParse(validPayload);
     expect(result.success).toBe(true);
   });
 
-  // Test cases for the markup ceiling
   it(`should accept markup equal to the maximum of ${MAX_MARKUP_BPS} bps`, () => {
     const payload = {
-      clientName: 'Edge Case Client',
+      managerId: validManagerId,
+      name: 'Edge Case Client',
       markupBps: MAX_MARKUP_BPS,
     };
     const result = CreateVaultSchema.safeParse(payload);
@@ -23,7 +25,8 @@ describe('CreateVaultSchema', () => {
 
   it(`should reject markup exceeding the maximum of ${MAX_MARKUP_BPS} bps`, () => {
     const payload = {
-      clientName: 'Invalid Client',
+      managerId: validManagerId,
+      name: 'Invalid Client',
       markupBps: MAX_MARKUP_BPS + 1,
     };
     const result = CreateVaultSchema.safeParse(payload);
@@ -35,9 +38,8 @@ describe('CreateVaultSchema', () => {
     }
   });
 
-  // Test cases for other invalid inputs
   it('should reject a negative markup', () => {
-    const payload = { clientName: 'Negative Markup', markupBps: -1 };
+    const payload = { managerId: validManagerId, name: 'Negative Markup', markupBps: -1 };
     const result = CreateVaultSchema.safeParse(payload);
     expect(result.success).toBe(false);
     if (!result.success) {
@@ -46,7 +48,7 @@ describe('CreateVaultSchema', () => {
   });
 
   it('should reject a non-integer markup', () => {
-    const payload = { clientName: 'Float Markup', markupBps: 150.5 };
+    const payload = { managerId: validManagerId, name: 'Float Markup', markupBps: 150.5 };
     const result = CreateVaultSchema.safeParse(payload);
     expect(result.success).toBe(false);
     if (!result.success) {
@@ -54,12 +56,21 @@ describe('CreateVaultSchema', () => {
     }
   });
 
-  it('should reject a request with an empty client name', () => {
-    const payload = { clientName: '', markupBps: 100 };
+  it('should reject a request with an empty name', () => {
+    const payload = { managerId: validManagerId, name: '', markupBps: 100 };
     const result = CreateVaultSchema.safeParse(payload);
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues[0].message).toBe('Client name cannot be empty.');
+      expect(result.error.issues[0].message).toBe('Vault name cannot be empty.');
+    }
+  });
+
+  it('should reject an invalid managerId', () => {
+    const payload = { managerId: 'not-a-uuid', name: 'Client', markupBps: 100 };
+    const result = CreateVaultSchema.safeParse(payload);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toBe('managerId must be a valid UUID.');
     }
   });
 });
