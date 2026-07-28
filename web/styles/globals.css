@@ -1,3 +1,11 @@
+/* Import the design-token registry so `bg-primary`, `text-foreground`,
+   `border-border`, etc. resolve through CSS custom properties defined in
+   `variables.css`. Closes #105 / WEB-19.
+
+   `variables.css` MUST appear before the `@tailwind` directives so the
+   `:root` custom-properties are in scope before Tailwind's `base` layer. */
+@import "./variables.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

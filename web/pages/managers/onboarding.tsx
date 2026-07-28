@@ -4,6 +4,7 @@ import Head from "next/head";
 import { useRouter } from "next/router";
 import { useState, useEffect } from "react";
 import { ConnectButton } from "../../components/ConnectButton";
+import { SEO } from "../../components/SEO";
 import { useWalletStore } from "../../context/WalletContext";
 import { managerService } from "../../lib/api";
 import { shallow } from "../../lib/createStore";
@@ -106,9 +107,12 @@ export default function ManagerOnboarding() {
 
   return (
     <>
-      <Head>
-        <title>Manager Onboarding | Perigee</title>
-      </Head>
+      <Head />
+      <SEO
+        title="Manager Onboarding"
+        description="Register as a wealth manager on the Perigee autonomous portfolio protocol — submit KYC details and track your approval status."
+        path="/managers/onboarding"
+      />
       <main className="min-h-screen bg-slate-950 text-slate-100">
         <header className="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
           <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">

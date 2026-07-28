@@ -6,6 +6,7 @@ import { ContractInteraction } from "../components/ContractInteraction";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { FunctionSidebar } from "../components/FunctionSidebar";
 import { ResultViewer } from "../components/Resultviewer";
+import { SEO } from "../components/SEO";
 import { UploadZone } from "../components/upload-zone";
 import { analyzeService } from "../lib/api";
 import { contractIds } from "../lib/contracts.config";
@@ -102,10 +103,13 @@ export default function Home() {
   return (
     <main className="flex min-h-screen flex-col items-center bg-slate-950 text-slate-100">
       <Head>
-        <title>Perigee — Soroban Contract Analyzer</title>
-        <meta name="description" content="Autonomous portfolio management for Stellar. Analyze Soroban contracts, simulate invocations, and optimize gas usage." />
         <link rel="icon" href="/favicon.ico" />
       </Head>
+      <SEO
+        title="Soroban Contract Analyzer"
+        description="Autonomous portfolio management for Stellar. Analyze Soroban contracts, simulate invocations, and optimize gas usage."
+        path="/"
+      />
 
       <div className="w-full max-w-7xl px-4 py-8">
         <header className="mb-8 flex items-center justify-between">

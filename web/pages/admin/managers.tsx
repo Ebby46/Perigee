@@ -4,6 +4,7 @@ import Head from "next/head";
 import { useRouter } from "next/router";
 import { useState, useEffect } from "react";
 import { ConnectButton } from "../../components/ConnectButton";
+import { SEO } from "../../components/SEO";
 import { managerService, type ManagerRecord } from "../../lib/api";
 
 export default function AdminManagers() {
@@ -59,9 +60,13 @@ export default function AdminManagers() {
 
   return (
     <>
-      <Head>
-        <title>Admin — Managers | Perigee</title>
-      </Head>
+      <Head />
+      <SEO
+        title="Admin — Managers"
+        description="Approve or reject wealth-manager onboarding submissions for the Perigee autonomous portfolio protocol."
+        path="/admin/managers"
+        noIndex
+      />
       <main className="min-h-screen bg-slate-950 text-slate-100">
         <header className="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
           <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
