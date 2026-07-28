@@ -1,11 +1,11 @@
 use crate::errors::AppError;
+use crate::db;
 use axum::{
     extract::{Path, State},
     Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
 use std::sync::Arc;
 use thiserror::Error;
 use utoipa::ToSchema;
@@ -37,7 +37,7 @@ impl From<ManagerStoreError> for AppError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct ManagerRecord {
     pub id: String,
     pub stellar_address: String,
@@ -50,7 +50,7 @@ pub struct ManagerRecord {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RegisterManagerRequest {
     pub stellar_address: String,
     pub name: String,
@@ -60,13 +60,13 @@ pub struct RegisterManagerRequest {
     pub kyc_document_ref: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ApproveManagerRequest {
     #[serde(default)]
     pub notes: String,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ManagerStatusResponse {
     pub id: String,
     pub status: String,
@@ -74,12 +74,12 @@ pub struct ManagerStatusResponse {
 }
 
 pub struct ManagerStore {
-    pool: SqlitePool,
+    managers: db::schema::ManagersTable,
 }
 
 impl ManagerStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(managers: db::schema::ManagersTable) -> Self {
+        Self { managers }
     }
 
     pub async fn register(&self, req: &RegisterManagerRequest) -> Result<ManagerRecord, ManagerStoreError> {
@@ -96,64 +96,39 @@ impl ManagerStore {
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
+        let stellar = req.stellar_address.trim();
+        let name = req.name.trim();
+        let email = req.email.trim();
+        let kyc = req.kyc_document_ref.trim();
 
-        let result = sqlx::query(
-            r#"
-            INSERT INTO managers (id, stellar_address, name, email, status, kyc_document_ref, notes, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, 'pending', ?5, '', ?6, ?7)
-            "#,
-        )
-        .bind(&id)
-        .bind(req.stellar_address.trim())
-        .bind(req.name.trim())
-        .bind(req.email.trim())
-        .bind(&req.kyc_document_ref)
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
-        .await;
-
-        match result {
-            Ok(_) => self.get(&id).await,
-            Err(sqlx::Error::Database(db_err)) => {
-                if db_err.message().contains("UNIQUE") {
-                    Err(ManagerStoreError::DuplicateAddress(
-                        req.stellar_address.trim().to_string(),
-                    ))
-                } else {
-                    Err(ManagerStoreError::Database(sqlx::Error::Database(db_err)))
+        self.managers
+            .insert(&id, stellar, name, email, kyc, now)
+            .await
+            .map_err(|e| match e {
+                sqlx::Error::Database(db_err) => {
+                    if db_err.message().contains("UNIQUE") {
+                        ManagerStoreError::DuplicateAddress(stellar.to_string())
+                    } else {
+                        ManagerStoreError::Database(e)
+                    }
                 }
-            }
-            Err(e) => Err(ManagerStoreError::Database(e)),
-        }
+                other => ManagerStoreError::Database(other),
+            })
     }
 
     pub async fn get(&self, id: &str) -> Result<ManagerRecord, ManagerStoreError> {
-        sqlx::query_as::<_, ManagerRecord>(
-            r#"
-            SELECT id, stellar_address, name, email, status, kyc_document_ref, notes, created_at, updated_at
-            FROM managers
-            WHERE id = ?1
-            "#,
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| ManagerStoreError::NotFound(id.to_string()))
+        self.managers
+            .find_by_id(id)
+            .await
+            .map_err(ManagerStoreError::Database)?
+            .ok_or_else(|| ManagerStoreError::NotFound(id.to_string()))
     }
 
     pub async fn find_by_stellar_address(&self, address: &str) -> Result<Option<ManagerRecord>, ManagerStoreError> {
-        let record = sqlx::query_as::<_, ManagerRecord>(
-            r#"
-            SELECT id, stellar_address, name, email, status, kyc_document_ref, notes, created_at, updated_at
-            FROM managers
-            WHERE stellar_address = ?1
-            "#,
-        )
-        .bind(address)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(record)
+        self.managers
+            .find_by_stellar_address(address)
+            .await
+            .map_err(ManagerStoreError::Database)
     }
 
     pub async fn is_approved(&self, stellar_address: &str) -> Result<bool, ManagerStoreError> {
@@ -165,30 +140,10 @@ impl ManagerStore {
     }
 
     pub async fn list(&self, status_filter: Option<&str>) -> Result<Vec<ManagerRecord>, ManagerStoreError> {
-        let records = if let Some(status) = status_filter {
-            sqlx::query_as::<_, ManagerRecord>(
-                r#"
-                SELECT id, stellar_address, name, email, status, kyc_document_ref, notes, created_at, updated_at
-                FROM managers
-                WHERE status = ?1
-                ORDER BY created_at DESC
-                "#,
-            )
-            .bind(status)
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query_as::<_, ManagerRecord>(
-                r#"
-                SELECT id, stellar_address, name, email, status, kyc_document_ref, notes, created_at, updated_at
-                FROM managers
-                ORDER BY created_at DESC
-                "#,
-            )
-            .fetch_all(&self.pool)
-            .await?
-        };
-        Ok(records)
+        self.managers
+            .list(status_filter)
+            .await
+            .map_err(ManagerStoreError::Database)
     }
 
     pub async fn approve(
@@ -196,36 +151,10 @@ impl ManagerStore {
         id: &str,
         req: &ApproveManagerRequest,
     ) -> Result<ManagerRecord, ManagerStoreError> {
-        let now = Utc::now();
-        let result = sqlx::query(
-            r#"
-            UPDATE managers
-            SET status = 'approved', notes = ?1, updated_at = ?2
-            WHERE id = ?3 AND status = 'pending'
-            "#,
-        )
-        .bind(&req.notes)
-        .bind(now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-
-        if result.rows_affected() == 0 {
-            let record = self.get(id).await?;
-            if record.status == "approved" {
-                return Err(ManagerStoreError::InvalidData(
-                    "Manager is already approved".into(),
-                ));
-            }
-            if record.status == "rejected" {
-                return Err(ManagerStoreError::InvalidData(
-                    "Cannot approve a rejected manager".into(),
-                ));
-            }
-            return Err(ManagerStoreError::NotFound(id.to_string()));
-        }
-
-        self.get(id).await
+        self.managers
+            .update_status(id, "approved", &req.notes, Utc::now())
+            .await
+            .map_err(ManagerStoreError::Database)
     }
 
     pub async fn reject(
@@ -233,36 +162,10 @@ impl ManagerStore {
         id: &str,
         req: &ApproveManagerRequest,
     ) -> Result<ManagerRecord, ManagerStoreError> {
-        let now = Utc::now();
-        let result = sqlx::query(
-            r#"
-            UPDATE managers
-            SET status = 'rejected', notes = ?1, updated_at = ?2
-            WHERE id = ?3 AND status = 'pending'
-            "#,
-        )
-        .bind(&req.notes)
-        .bind(now)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-
-        if result.rows_affected() == 0 {
-            let record = self.get(id).await?;
-            if record.status == "rejected" {
-                return Err(ManagerStoreError::InvalidData(
-                    "Manager is already rejected".into(),
-                ));
-            }
-            if record.status == "approved" {
-                return Err(ManagerStoreError::InvalidData(
-                    "Cannot reject an approved manager".into(),
-                ));
-            }
-            return Err(ManagerStoreError::NotFound(id.to_string()));
-        }
-
-        self.get(id).await
+        self.managers
+            .update_status(id, "rejected", &req.notes, Utc::now())
+            .await
+            .map_err(ManagerStoreError::Database)
     }
 }
 

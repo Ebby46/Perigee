@@ -45,6 +45,7 @@ pub mod validation;
 pub mod fee_validation;
 pub mod secure_ids;
 pub mod audit_log;
+pub mod db;
 pub mod manager_store;
 
 #[cfg(test)]
