@@ -2,8 +2,13 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, xdr::ToXdr, Address, Bytes,
-    BytesN, Env, String, Symbol,
+    BytesN, Env, String, Symbol, Vec,
 };
+
+/// Default cap on the approved-asset list until an admin explicitly migrates it higher.
+const DEFAULT_MAX_APPROVED_ASSETS: u32 = 50;
+/// Hard ceiling on the approved-asset cap so a migration can never make the list unbounded.
+const MAX_APPROVED_ASSETS_CEILING: u32 = 500;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,6 +33,8 @@ pub enum PolicyDataKey {
     Admin,
     AllowSignerChanges,
     SignerWeight(Address),
+    ApprovedAssets,
+    MaxApprovedAssets,
     AgentNonce(Address),
 }
 
@@ -40,7 +47,11 @@ pub enum PolicyError {
     Unauthorized = 3,
     SignerChangesForbidden = 4,
     InvalidWeight = 5,
-    InvalidNonce = 6,
+    AssetListFull = 6,
+    AssetAlreadyApproved = 7,
+    AssetNotApproved = 8,
+    InvalidMaxApprovedAssets = 9,
+    InvalidNonce = 10,
 }
 
 #[contract]
@@ -222,6 +233,118 @@ impl AccountSignerPolicy {
             .persistent()
             .get(&PolicyDataKey::SignerWeight(signer))
             .unwrap_or(0)
+    }
+
+    /// Currently configured cap on the approved-asset list.
+    /// Defaults to `DEFAULT_MAX_APPROVED_ASSETS` until raised via `set_max_approved_assets`.
+    pub fn max_approved_assets(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&PolicyDataKey::MaxApprovedAssets)
+            .unwrap_or(DEFAULT_MAX_APPROVED_ASSETS)
+    }
+
+    /// Admin-only migration step to raise the approved-asset cap.
+    /// Bounded by `MAX_APPROVED_ASSETS_CEILING` so growth can never become unbounded,
+    /// and can never drop below the number of assets already approved.
+    pub fn set_max_approved_assets(env: Env, admin: Address, new_max: u32) -> Result<(), PolicyError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&PolicyDataKey::Admin)
+            .ok_or(PolicyError::NotInitialized)?;
+
+        if admin != stored_admin {
+            return Err(PolicyError::Unauthorized);
+        }
+        admin.require_auth();
+
+        let current_len = Self::get_approved_assets(env.clone()).len();
+        if new_max > MAX_APPROVED_ASSETS_CEILING || new_max < current_len {
+            return Err(PolicyError::InvalidMaxApprovedAssets);
+        }
+
+        env.storage()
+            .instance()
+            .set(&PolicyDataKey::MaxApprovedAssets, &new_max);
+
+        env.events().publish((symbol_short!("max_up"),), (new_max,));
+        Ok(())
+    }
+
+    /// Admin-only: add an asset to the approved list, enforcing the configured cap.
+    pub fn add_approved_asset(env: Env, admin: Address, asset: Address) -> Result<(), PolicyError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&PolicyDataKey::Admin)
+            .ok_or(PolicyError::NotInitialized)?;
+
+        if admin != stored_admin {
+            return Err(PolicyError::Unauthorized);
+        }
+        admin.require_auth();
+
+        let mut assets = Self::get_approved_assets(env.clone());
+        if assets.contains(&asset) {
+            return Err(PolicyError::AssetAlreadyApproved);
+        }
+
+        let max = Self::max_approved_assets(env.clone());
+        if assets.len() >= max {
+            return Err(PolicyError::AssetListFull);
+        }
+
+        assets.push_back(asset.clone());
+        env.storage()
+            .instance()
+            .set(&PolicyDataKey::ApprovedAssets, &assets);
+
+        env.events().publish((symbol_short!("asset_add"),), (asset,));
+        Ok(())
+    }
+
+    /// Admin-only: remove an asset from the approved list.
+    pub fn remove_approved_asset(env: Env, admin: Address, asset: Address) -> Result<(), PolicyError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&PolicyDataKey::Admin)
+            .ok_or(PolicyError::NotInitialized)?;
+
+        if admin != stored_admin {
+            return Err(PolicyError::Unauthorized);
+        }
+        admin.require_auth();
+
+        let assets = Self::get_approved_assets(env.clone());
+        let mut new_assets = Vec::new(&env);
+        let mut found = false;
+        for a in assets.iter() {
+            if a != asset {
+                new_assets.push_back(a);
+            } else {
+                found = true;
+            }
+        }
+        if !found {
+            return Err(PolicyError::AssetNotApproved);
+        }
+
+        env.storage()
+            .instance()
+            .set(&PolicyDataKey::ApprovedAssets, &new_assets);
+
+        env.events().publish((symbol_short!("asset_rm"),), (asset,));
+        Ok(())
+    }
+
+    /// Read the current approved-asset list.
+    pub fn get_approved_assets(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&PolicyDataKey::ApprovedAssets)
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Next nonce `agent` must supply to `execute_scoped_call` on this vault's policy contract.

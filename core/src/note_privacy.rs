@@ -20,6 +20,7 @@ impl NoteEnvelope {
         let mut padded = data.to_vec();
         if padded.len() < target_size {
             let padding_len = target_size - padded.len();
+            // Pad with deterministic pattern to avoid leaking real content
             for i in 0..padding_len {
                 padded.push((i % 256) as u8);
             }
