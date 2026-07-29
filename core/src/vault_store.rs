@@ -4,10 +4,11 @@
 //! The store bumps `version` only when `WHERE id = ? AND version = ?` matches;
 //! otherwise the caller gets a conflict and must reload.
 
+use crate::auth::AuthenticatedUser;
 use crate::errors::AppError;
 use crate::db;
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, Query, State},
     Json,
 };
 use chrono::{DateTime, Utc};
@@ -147,6 +148,22 @@ impl VaultStore {
             .map_err(VaultStoreError::Database)
     }
 
+    pub async fn list_by_manager(&self, manager_id: &str) -> Result<Vec<VaultRecord>, VaultStoreError> {
+        sqlx::query_as::<_, VaultRecord>(
+            r#"
+            SELECT id, manager_id, name, status, config_json, version,
+                   idempotency_key, created_at, updated_at
+            FROM vaults
+            WHERE manager_id = ?1
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(manager_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(VaultStoreError::Database)
+    }
+
     pub async fn get(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
         self.vaults
             .find_by_id(id)
@@ -195,7 +212,56 @@ impl VaultStore {
     }
 }
 
+/// Verify that `manager_id` (UUID) belongs to the authenticated Stellar address.
+async fn verify_ownership(
+    state: &crate::AppState,
+    user: &AuthenticatedUser,
+    manager_id: &str,
+) -> Result<(), AppError> {
+    let manager = state
+        .manager_store
+        .find_by_stellar_address(&user.stellar_address)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| {
+            AppError::Unauthorized("Manager not found for authenticated user".into())
+        })?;
+    if manager.id != manager_id {
+        return Err(AppError::Unauthorized(
+            "You can only access vaults belonging to your own manager account".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ListVaultsQuery {
+    pub manager_id: String,
+}
+
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/vaults",
+    params(
+        ("manager_id" = String, Query, description = "Manager ID to list vaults for")
+    ),
+    responses(
+        (status = 200, description = "List of vaults for the manager", body = Vec<VaultRecord>),
+        (status = 401, description = "Unauthorized")
+    ),
+    tag = "Vaults"
+)]
+pub async fn list_vaults_handler(
+    State(state): State<Arc<crate::AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Query(query): Query<ListVaultsQuery>,
+) -> Result<Json<Vec<VaultRecord>>, AppError> {
+    verify_ownership(&state, &user, &query.manager_id).await?;
+    let vaults = state.vault_store.list_by_manager(&query.manager_id).await?;
+    Ok(Json(vaults))
+}
 
 #[utoipa::path(
     post,
@@ -209,11 +275,13 @@ impl VaultStore {
 )]
 pub async fn create_vault_handler(
     State(state): State<Arc<crate::AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     Json(payload): Json<CreateVaultRequest>,
 ) -> Result<Json<VaultRecord>, AppError> {
+    verify_ownership(&state, &user, &payload.manager_id).await?;
     let approved = state
         .manager_store
-        .is_approved(&payload.manager_id)
+        .is_approved(&user.stellar_address)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     if !approved {
@@ -237,9 +305,11 @@ pub async fn create_vault_handler(
 )]
 pub async fn get_vault_handler(
     State(state): State<Arc<crate::AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
 ) -> Result<Json<VaultRecord>, AppError> {
     let vault = state.vault_store.get(&id).await?;
+    verify_ownership(&state, &user, &vault.manager_id).await?;
     Ok(Json(vault))
 }
 
@@ -257,9 +327,12 @@ pub async fn get_vault_handler(
 )]
 pub async fn update_vault_handler(
     State(state): State<Arc<crate::AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
     Json(payload): Json<UpdateVaultRequest>,
 ) -> Result<Json<VaultRecord>, AppError> {
+    let vault = state.vault_store.get(&id).await?;
+    verify_ownership(&state, &user, &vault.manager_id).await?;
     let vault = state.vault_store.update(&id, &payload).await?;
     Ok(Json(vault))
 }

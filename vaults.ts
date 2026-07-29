@@ -12,7 +12,7 @@ const vaultService = {
     console.log('Creating vault with validated data:', data);
     // Simulate database record creation
     const newVault = {
-      id: `vault_${Math.random().toString(36).substring(2, 11)}`,
+      id: crypto.randomUUID(),
       ...data,
       createdAt: new Date().toISOString(),
     };
@@ -24,7 +24,8 @@ const vaultService = {
  * POST /vaults
  *
  * Creates a new white-label vault. The request body is validated against
- * the CreateVaultSchema to ensure the markup does not exceed the policy ceiling.
+ * the CreateVaultSchema to ensure the managerId is a valid UUID, the name
+ * is non-empty, and the markup does not exceed the policy ceiling.
  */
 router.post('/vaults', async (req: Request, res: Response) => {
   // 1. Parse and validate the incoming request body using the Zod schema.

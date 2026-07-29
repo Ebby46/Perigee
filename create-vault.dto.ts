@@ -7,15 +7,9 @@ import { z } from 'zod';
  */
 export const MAX_MARKUP_BPS = 500;
 
-/**
- * Zod schema for validating the `create-vault` request body.
- *
- * It ensures that:
- * - `clientName` is a non-empty string.
- * - `markupBps` is an integer between 0 and `MAX_MARKUP_BPS`.
- */
 export const CreateVaultSchema = z.object({
-  clientName: z.string().min(1, { message: 'Client name cannot be empty.' }),
+  managerId: z.string().uuid({ message: 'managerId must be a valid UUID.' }),
+  name: z.string().min(1, { message: 'Vault name cannot be empty.' }),
   markupBps: z
     .number()
     .int({ message: 'Markup must be an integer.' })
@@ -25,7 +19,4 @@ export const CreateVaultSchema = z.object({
     }),
 });
 
-/**
- * Type definition for the validated `create-vault` request body.
- */
 export type CreateVaultDto = z.infer<typeof CreateVaultSchema>;

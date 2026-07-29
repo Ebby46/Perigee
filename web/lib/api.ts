@@ -307,6 +307,54 @@ export const managerService = {
   },
 };
 
+export interface VaultRecord {
+  id: string;
+  manager_id: string;
+  name: string;
+  status: string;
+  config_json: string;
+  version: number;
+  idempotency_key: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateVaultRequest {
+  manager_id: string;
+  name: string;
+  status?: string;
+  config_json?: string;
+  idempotency_key?: string;
+}
+
+export interface UpdateVaultRequest {
+  version: number;
+  name?: string;
+  status?: string;
+  config_json?: string;
+}
+
+export const vaultService = {
+  async list(managerId: string, token?: string): Promise<VaultRecord[]> {
+    return apiClient.get<VaultRecord[]>("/vaults", {
+      params: { manager_id: managerId },
+      token,
+    });
+  },
+
+  async get(id: string, token?: string): Promise<VaultRecord> {
+    return apiClient.get<VaultRecord>(`/vaults/${id}`, { token });
+  },
+
+  async create(req: CreateVaultRequest, token?: string): Promise<VaultRecord> {
+    return apiClient.post<VaultRecord>("/vaults", req, { token });
+  },
+
+  async update(id: string, req: UpdateVaultRequest, token?: string): Promise<VaultRecord> {
+    return apiClient.patch<VaultRecord>(`/vaults/${id}`, req, { token });
+  },
+};
+
 export const analyzeService = {
   async analyze(req: AnalyzeRequest, token?: string): Promise<AnalyzeResponse> {
     const validatedRequest = await validateAnalyzeRequest(req);

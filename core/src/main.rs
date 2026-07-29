@@ -1712,7 +1712,7 @@ pub struct FeeAnalyticsEnvelope {
         auth::revoke_handler, auth::jwks_handler,
         fee_recommend, fee_history, fee_analytics,
         vault_store::create_vault_handler, vault_store::get_vault_handler,
-        vault_store::update_vault_handler
+        vault_store::update_vault_handler, vault_store::list_vaults_handler
     ),
     components(schemas(
         AnalyzeRequest, AnalyzeWasmRequest, AnalyzeWasmBranchesRequest,
@@ -1737,7 +1737,7 @@ pub struct FeeAnalyticsEnvelope {
         crate::fee_analytics::TrendDirection,
         FeeAnalyticsEnvelope,
         vault_store::VaultRecord, vault_store::CreateVaultRequest,
-        vault_store::UpdateVaultRequest
+        vault_store::UpdateVaultRequest, vault_store::ListVaultsQuery
     )),
     tags(
         (name = "Analysis", description = "Soroban contract resource analysis endpoints"),
@@ -1767,6 +1767,8 @@ async fn not_found_handler(request: axum::extract::Request) -> impl IntoResponse
     let path = request.uri().path().to_owned();
     tracing::debug!(path = %path, "Unmatched route");
     AppError::NotFound(format!("No route for {}", path))
+}
+
 async fn ready_check(State(state): State<Arc<AppState>>) -> axum::response::Response {
     use axum::response::IntoResponse;
     
@@ -2376,6 +2378,12 @@ async fn main() {
         .route("/analyze/optimize-limits", post(optimize_limits))
         .route("/analyze/compare", post(compare_handler))
         .route("/analyze/gas-golfing", post(analyze_gas_golfing))
+        // Vault records with tenant-scoped access (API-37)
+        .route("/vaults", get(vault_store::list_vaults_handler).post(vault_store::create_vault_handler))
+        .route(
+            "/vaults/:id",
+            get(vault_store::get_vault_handler).patch(vault_store::update_vault_handler),
+        )
         .route_layer(middleware::from_fn(auth::auth_middleware));
 
     let app = Router::new()
@@ -2399,12 +2407,6 @@ async fn main() {
         .route("/fees/recommend", get(fee_recommend))
         .route("/fees/history", get(fee_history))
         .route("/fees/analytics", get(fee_analytics))
-        // Vault records with optimistic locking (API-37)
-        .route("/vaults", post(vault_store::create_vault_handler))
-        .route(
-            "/vaults/:id",
-            get(vault_store::get_vault_handler).patch(vault_store::update_vault_handler),
-        )
         // Manager onboarding with approval/KYC gate (API-33)
         .route("/managers/register", post(manager_store::register_manager_handler))
         .route("/managers", get(manager_store::list_managers_handler))

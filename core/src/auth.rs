@@ -21,11 +21,7 @@ use soroban_sdk::xdr::{
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use stellar_strkey::Strkey;
 use utoipa::ToSchema;
@@ -52,6 +48,15 @@ enum RefreshTokenRecord {
         family_id: String,
         expires_at: u64,
     },
+}
+
+/// Authenticated user extracted from JWT and injected into request extensions
+/// for tenant-scoped handlers.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedUser {
+    pub stellar_address: String,
+}
+
 const RATE_LIMIT_CAPACITY: f64 = 60.0;
 const RATE_LIMIT_REFILL_RATE: f64 = 1.0; // Refills 1 token per second (60 requests/minute)
 
@@ -225,13 +230,13 @@ pub struct EmergencyPauseResponse {
     pub message: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct Claims {
-    pub(crate) sub: String,
-    pub(crate) iss: String,
-    pub(crate) exp: u64,
-    pub(crate) iat: u64,
-    pub(crate) scopes: Vec<String>,
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Claims {
+    pub sub: String,
+    pub iss: String,
+    pub exp: u64,
+    pub iat: u64,
+    pub scopes: Vec<String>,
 }
 
 fn now_secs() -> u64 {
@@ -807,6 +812,11 @@ pub async fn auth_middleware(
             )));
         }
     }
+
+    let mut req = req;
+    req.extensions_mut().insert(AuthenticatedUser {
+        stellar_address: token_data.claims.sub.clone(),
+    });
 
     Ok(next.run(req).await)
 }
