@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useCallback } from "react";
+import { useTranslations } from "next-intl";
 
 interface NavDrawerProps {
   isOpen: boolean;
@@ -21,7 +22,9 @@ interface NavDrawerProps {
  *
  * Resolves WEB-58 (#191): mobile nav drawer not accessible.
  */
-export function NavDrawer({ isOpen, onClose, children, title = "Navigation" }: NavDrawerProps) {
+export function NavDrawer({ isOpen, onClose, children, title }: NavDrawerProps) {
+  const t = useTranslations();
+  const resolvedTitle = title ?? t("nav.title");
   const drawerRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const titleId = "nav-drawer-title";
@@ -115,7 +118,7 @@ export function NavDrawer({ isOpen, onClose, children, title = "Navigation" }: N
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close navigation drawer"
+            aria-label={t("nav.close")}
             className="rounded p-1 text-slate-400 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500"
           >
             <svg
@@ -136,7 +139,7 @@ export function NavDrawer({ isOpen, onClose, children, title = "Navigation" }: N
         </div>
 
         {/* Drawer content */}
-        <nav aria-label="Mobile navigation" className="flex-1 overflow-y-auto px-4 py-4">
+        <nav aria-label={t("nav.mobile")} className="flex-1 overflow-y-auto px-4 py-4">
           {children}
         </nav>
       </div>

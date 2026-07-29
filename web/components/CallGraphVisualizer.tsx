@@ -2,12 +2,15 @@
 
 import React, { useEffect, useRef } from 'react';
 import { logger } from '../lib/logger';
+import { sanitizeSvg, sanitizeHtml } from '../lib/sanitize';
+import { useTranslations } from 'next-intl';
 
 interface CallGraphVisualizerProps {
   mermaidDefinition: string;
 }
 
 export function CallGraphVisualizer({ mermaidDefinition }: CallGraphVisualizerProps) {
+  const t = useTranslations();
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -34,12 +37,12 @@ export function CallGraphVisualizer({ mermaidDefinition }: CallGraphVisualizerPr
           const id = `mermaid-graph-${Math.random().toString(36).substring(2, 9)}`;
           const { svg } = await mermaid.render(id, mermaidDefinition);
           if (isMounted && containerRef.current) {
-            containerRef.current.innerHTML = svg;
+            containerRef.current.innerHTML = sanitizeSvg(svg);
           }
         } catch (error) {
           logger.error('Mermaid rendering failed:', error);
           if (isMounted && containerRef.current) {
-            containerRef.current.innerHTML = `<p style="color: #fb8500;">Failed to render call graph: ${String(error)}</p>`;
+            containerRef.current.innerHTML = sanitizeHtml(`<p style="color: #fb8500;">${t("callGraph.error")} ${String(error)}</p>`);
           }
         }
       }
@@ -55,7 +58,7 @@ export function CallGraphVisualizer({ mermaidDefinition }: CallGraphVisualizerPr
   return (
     <div style={{ marginTop: '20px' }}>
       <h4 style={{ color: '#00d9ff', fontSize: '14px', marginBottom: '12px', fontWeight: '600' }}>
-        Cross-Contract Dependency Graph
+        {t("callGraph.title")}
       </h4>
       <div
         ref={containerRef}

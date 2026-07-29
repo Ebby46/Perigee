@@ -1,5 +1,6 @@
 import Head from "next/head";
 import { useEffect, useState, useCallback, useMemo } from "react";
+import { useTranslations } from "next-intl";
 
 import { ConnectButton } from "../components/ConnectButton";
 import { ContractInteraction } from "../components/ContractInteraction";
@@ -19,6 +20,7 @@ import {
 } from "../lib/sorobantypes";
 
 export default function Home() {
+  const t = useTranslations();
   const [contractId, setContractId] = useState(
     contractIds.helloSoroban ?? "",
   );
@@ -106,14 +108,14 @@ export default function Home() {
         <link rel="icon" href="/favicon.ico" />
       </Head>
       <SEO
-        title="Soroban Contract Analyzer"
-        description="Autonomous portfolio management for Stellar. Analyze Soroban contracts, simulate invocations, and optimize gas usage."
+        title={t("home.heading")}
+        description={t("home.description")}
         path="/"
       />
 
       <div className="w-full max-w-7xl px-4 py-8">
         <header className="mb-8 flex items-center justify-between">
-          <h1 className="text-2xl font-bold text-sky-400">Perigee</h1>
+          <h1 className="text-2xl font-bold text-sky-400">{t("home.title")}</h1>
           <ConnectButton />
         </header>
 

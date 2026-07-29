@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useCallback } from "react";
+import { useTranslations } from "next-intl";
 
 /**
  * NetworkStatusBanner
@@ -44,12 +45,12 @@ async function pingApi(apiUrl: string): Promise<boolean> {
 
 const messages: Record<Exclude<NetworkStatus, "online">, { title: string; body: string }> = {
   offline: {
-    title: "You are offline.",
-    body: "Check your internet connection. Your work is saved locally.",
+    title: "network.offlineTitle",
+    body: "network.offlineBody",
   },
   "api-down": {
-    title: "Backend unavailable.",
-    body: "Analysis and simulation features are temporarily unreachable. We’ll retry automatically.",
+    title: "network.apiDownTitle",
+    body: "network.apiDownBody",
   },
 };
 
@@ -58,6 +59,7 @@ interface NetworkStatusBannerProps {
 }
 
 export function NetworkStatusBanner({ apiUrl }: NetworkStatusBannerProps) {
+  const t = useTranslations();
   const [status, setStatus] = useState<NetworkStatus>("online");
   const [retryCount, setRetryCount] = useState(0);
 
@@ -102,6 +104,9 @@ export function NetworkStatusBanner({ apiUrl }: NetworkStatusBannerProps) {
 
   const { title, body } = messages[status];
   const isOffline = status === "offline";
+
+  const displayTitle = t(title);
+  const displayBody = t(body);
 
   return (
     <div
@@ -151,8 +156,8 @@ export function NetworkStatusBanner({ apiUrl }: NetworkStatusBannerProps) {
 
       {/* Message */}
       <div className="flex-1">
-        <span className="font-semibold">{title}</span>{" "}
-        <span className="opacity-80">{body}</span>
+        <span className="font-semibold">{displayTitle}</span>{" "}
+        <span className="opacity-80">{displayBody}</span>
       </div>
 
       {/* Retry (API-down only) */}
@@ -164,7 +169,7 @@ export function NetworkStatusBanner({ apiUrl }: NetworkStatusBannerProps) {
                      text-amber-200 hover:bg-amber-800 focus:outline-none focus:ring-2
                      focus:ring-amber-400 disabled:opacity-50 transition-colors"
         >
-          Retry
+          {t("network.retry")}
         </button>
       )}
     </div>

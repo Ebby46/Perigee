@@ -1,4 +1,7 @@
 /** @type {import('next').NextConfig} */
+const createNextIntlPlugin = require('next-intl/plugin');
+const withNextIntl = createNextIntlPlugin('./lib/i18n.ts');
+
 const nextConfig = {
   reactStrictMode: true,
   transpilePackages: ["@creit.tech/stellar-wallets-kit"],
@@ -51,4 +54,4 @@ const nextConfig = {
   },
 };
 
-module.exports = nextConfig;
+module.exports = withNextIntl(nextConfig);

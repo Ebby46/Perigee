@@ -1,15 +1,19 @@
+'use client';
+
 import WasmUpload from "../components/WasmUpload";
+import { useTranslations } from "next-intl";
 
 export default function WasmUploadPage() {
+  const t = useTranslations();
   return (
     <main className="min-h-screen bg-slate-50 py-12 px-4">
       <div className="max-w-3xl mx-auto">
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold text-slate-900 mb-2">
-            Soroban Contract Upload
+            {t("wasmUpload.title")}
           </h1>
           <p className="text-slate-600">
-            Upload your compiled WASM files to analyze resource consumption
+            {t("wasmUpload.description")}
           </p>
         </div>
 
