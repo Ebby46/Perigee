@@ -4,6 +4,7 @@ import React, { useCallback, useState } from 'react';
 import { useDropzone, FileRejection } from 'react-dropzone';
 import { parseWasmError, WasmBackendError } from '../lib/errorHandling';
 import { arrayBufferToBase64 } from '../lib/utils';
+import { API_URL } from '../lib/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -178,7 +179,7 @@ function ErrorIcon() {
 export interface UploadZoneProps {
   /** Called with the validated File once scanning completes */
   onFileReady?: (file: File) => void;
-  /** Backend endpoint for WASM analysis (default: http://localhost:8080/analyze/wasm) */
+  /** Backend endpoint for WASM analysis (defaults to centralized API_URL + /analyze/wasm) */
   backendUrl?: string;
   /** Whether to validate with backend after client-side checks */
   enableBackendValidation?: boolean;
@@ -188,7 +189,7 @@ export interface UploadZoneProps {
 export function UploadZone({
   onFileReady,
   onReset,
-  backendUrl = 'http://localhost:8080/analyze/wasm',
+  backendUrl = `${API_URL}/analyze/wasm`,
   enableBackendValidation = true
 }: UploadZoneProps) {
   const [uploadState, setUploadState] = useState<UploadState>('idle');

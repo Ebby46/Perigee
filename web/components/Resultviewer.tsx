@@ -2,6 +2,7 @@
 
 import type { InvocationResult } from "../lib/sorobantypes";
 
+import { useTranslations } from "next-intl";
 import { CallGraphVisualizer } from "./CallGraphVisualizer";
 
 interface ResultViewerProps {
@@ -9,6 +10,7 @@ interface ResultViewerProps {
 }
 
 export function ResultViewer({ result }: ResultViewerProps) {
+  const t = useTranslations();
   const downloadSnapshot = () => {
     if (!result?.stateSnapshot) return;
     const blob = new Blob([JSON.stringify(result.stateSnapshot, null, 2)], {
@@ -36,7 +38,7 @@ export function ResultViewer({ result }: ResultViewerProps) {
           border: "1px solid #30363d",
         }}
       >
-        <p>No results yet. Execute a contract function to see results here.</p>
+        <p>{t("result.noResults")}</p>
       </div>
     );
   }
@@ -70,7 +72,7 @@ export function ResultViewer({ result }: ResultViewerProps) {
               fontWeight: "600",
             }}
           >
-            {result.success ? "✓ Success" : "✗ Error"}
+            {result.success ? t("result.success") : t("result.error")}
           </h3>
           <p style={{ margin: "0", color: "#8b949e", fontSize: "12px" }}>
             {new Date(result.timestamp).toLocaleString()}
@@ -97,7 +99,7 @@ export function ResultViewer({ result }: ResultViewerProps) {
               (e.currentTarget.style.backgroundColor = "#1f2937")
             }
           >
-            Download State Snapshot
+            {t("result.downloadSnapshot")}
           </button>
         )}
       </div>
@@ -124,7 +126,7 @@ export function ResultViewer({ result }: ResultViewerProps) {
                 gap: "8px",
               }}
             >
-              Error Details
+              {t("result.errorDetails")}
               {result.errorType && (
                 <span
                   style={{

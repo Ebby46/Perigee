@@ -1,4 +1,5 @@
 import Head from "next/head";
+import { useTranslations } from "next-intl";
 
 /**
  * SEO — Centralized per-page metadata.
@@ -54,6 +55,7 @@ export function SEO({
   ogImage,
   noIndex = false,
 }: SeoProps) {
+  const t = useTranslations();
   const fullTitle = buildTitle(title);
   const canonical = buildCanonical(path);
   const image = ogImage ?? DEFAULT_OG_IMAGE;
@@ -71,7 +73,7 @@ export function SEO({
       <meta property="og:type" content="website" />
       <meta property="og:image" content={image} />
       {canonical && <meta property="og:url" content={canonical} />}
-      <meta property="og:site_name" content="Perigee" />
+      <meta property="og:site_name" content={t("seo.siteName")} />
 
       {/* Twitter / X */}
       <meta name="twitter:card" content="summary_large_image" />

@@ -4,7 +4,10 @@ import { WalletProvider } from "../context/WalletContext";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Analytics } from "../components/Analytics";
 import { NetworkStatusBanner } from "../components/NetworkStatusBanner";
+import { RpcFallbackBanner } from "../components/RpcFallbackBanner";
+import { NextIntlClientProvider } from "next-intl";
 import { API_URL } from "../lib/api";
+import { useRouter } from "next/router";
 import { useEffect } from "react";
 
 /**
@@ -26,8 +29,6 @@ async function initAxe() {
     await axe.default(React.default, ReactDOM.default, 1000);
   }
 }
-import { RpcFallbackBanner } from "../components/RpcFallbackBanner";
-import { API_URL } from "../lib/api";
 
 export default function App({ Component, pageProps }: AppProps) {
   useEffect(() => {
@@ -37,16 +38,24 @@ export default function App({ Component, pageProps }: AppProps) {
     });
   }, []);
 
+  const router = useRouter();
+
   return (
-    <WalletProvider>
-      {/* Network status and API availability (#109) */}
-      <NetworkStatusBanner apiUrl={API_URL} />
-      {/* Graceful RPC fallback — shown when the backend is unreachable (#115) */}
-      <RpcFallbackBanner apiUrl={API_URL} />
-      <ErrorBoundary>
-        <Component {...pageProps} />
-        <Analytics />
-      </ErrorBoundary>
-    </WalletProvider>
+    <NextIntlClientProvider
+      locale={router?.locale ?? "en"}
+      messages={pageProps.messages ?? {}}
+      timeZone="UTC"
+    >
+      <WalletProvider>
+        {/* Network status and API availability (#109) */}
+        <NetworkStatusBanner apiUrl={API_URL} />
+        {/* Graceful RPC fallback — shown when the backend is unreachable (#115) */}
+        <RpcFallbackBanner apiUrl={API_URL} />
+        <ErrorBoundary>
+          <Component {...pageProps} />
+          <Analytics />
+        </ErrorBoundary>
+      </WalletProvider>
+    </NextIntlClientProvider>
   );
 }

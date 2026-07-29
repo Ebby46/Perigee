@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useCallback } from "react";
+import { useTranslations } from "next-intl";
 
 interface RpcHealth {
   healthy: boolean;
@@ -44,6 +45,7 @@ async function checkRpcHealth(apiUrl: string): Promise<boolean> {
  * Usage: render once in _app.tsx above <Component />.
  */
 export function RpcFallbackBanner({ apiUrl }: { apiUrl: string }) {
+  const t = useTranslations();
   const [health, setHealth] = useState<RpcHealth>({ healthy: true, checkedAt: 0 });
   const [checking, setChecking] = useState(false);
 
@@ -86,8 +88,8 @@ export function RpcFallbackBanner({ apiUrl }: { apiUrl: string }) {
           <line x1="12" y1="17" x2="12.01" y2="17" />
         </svg>
         <span>
-          <strong>Backend unreachable.</strong> Analysis features are temporarily unavailable.
-          Previously loaded data is still accessible.
+          <strong>{t("rpc.unreachableTitle")}</strong>{" "}
+          {t("rpc.unreachableBody")}
         </span>
       </div>
 
@@ -101,7 +103,7 @@ export function RpcFallbackBanner({ apiUrl }: { apiUrl: string }) {
                    focus:ring-amber-400 focus:ring-offset-2 focus:ring-offset-amber-900
                    disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
-        {checking ? "Checking…" : "Retry"}
+        {checking ? t("rpc.checking") : t("rpc.retry")}
       </button>
     </div>
   );
