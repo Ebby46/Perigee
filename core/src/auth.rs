@@ -678,6 +678,9 @@ pub async fn verify_handler(
 
     let subject = verify_challenge_envelope(&state, &payload.transaction)?;
     let tokens = issue_token_pair(&state, &subject)?;
+    
+    crate::audit_log::log_audit_event(&subject, "auth_login", &subject);
+
     Ok(Json(tokens))
 }
 

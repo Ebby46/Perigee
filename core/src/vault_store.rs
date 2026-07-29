@@ -290,6 +290,7 @@ pub async fn create_vault_handler(
         ));
     }
     let vault = state.vault_store.create(&payload).await?;
+    crate::audit_log::log_audit_event(&payload.manager_id, "vault_provisioning", &payload.manager_id);
     Ok(Json(vault))
 }
 
@@ -334,6 +335,11 @@ pub async fn update_vault_handler(
     let vault = state.vault_store.get(&id).await?;
     verify_ownership(&state, &user, &vault.manager_id).await?;
     let vault = state.vault_store.update(&id, &payload).await?;
+    if payload.config_json.is_some() {
+        crate::audit_log::log_audit_event(&vault.manager_id, "fee_split_change", &vault.manager_id);
+    } else {
+        crate::audit_log::log_audit_event(&vault.manager_id, "vault_update", &vault.manager_id);
+    }
     Ok(Json(vault))
 }
 
