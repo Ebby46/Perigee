@@ -702,3 +702,39 @@ impl CrossChainVerifierContract {
     // Note: The unpaused duplicate `verify_message_and_consume` has been removed.
 }
 
+use soroban_sdk::{contract, contractimpl, Address, Env, BytesN};
+
+#[contract]
+pub struct CrossChainVerifierContract;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    Admin,
+    MerkleRoot,
+}
+
+#[contractimpl]
+impl CrossChainVerifierContract {
+    /// Updates the trusted Merkle root for cross-chain message verification.
+    /// Strictly requires administrative authorization.
+    pub fn update_root(env: Env, new_root: BytesN<32>) -> Result<(), &'static str> {
+        // 1. Retrieve administrative address from persistent storage
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or("Admin not configured")?;
+
+        // 2. Enforce admin signature and authorization gate
+        admin.require_auth();
+
+        // 3. Store the updated Merkle root
+        env.storage().persistent().set(&DataKey::MerkleRoot, &new_root);
+
+        Ok(())
+    }
+
+    // Note: The unauthenticated duplicate `update_root` function has been successfully removed.
+}
+

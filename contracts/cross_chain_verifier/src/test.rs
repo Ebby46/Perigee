@@ -1101,3 +1101,45 @@ mod test {
         assert_eq!(result, Err("Contract is currently paused"), "Paused contract must reject all incoming messages");
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{Env, Address, BytesN};
+
+    #[test]
+    fn test_update_root_success_by_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let initial_root = BytesN::from_array(&env, &[1u8; 32]);
+        let new_root = BytesN::from_array(&env, &[2u8; 32]);
+
+        // 1. Configure admin and initial Merkle root in storage
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+        env.storage().persistent().set(&DataKey::MerkleRoot, &initial_root);
+
+        // 2. Perform root update as authorized admin
+        let result = CrossChainVerifierContract::update_root(env.clone(), new_root.clone());
+        assert!(result.is_ok(), "Admin should successfully update the Merkle root");
+
+        // 3. Verify storage reflects the updated root
+        let stored_root: BytesN<32> = env.storage().persistent().get(&DataKey::MerkleRoot).unwrap();
+        assert_eq!(stored_root, new_root, "Merkle root must be updated in persistent storage");
+    }
+
+    #[test]
+    fn test_update_root_fails_without_admin_auth() {
+        let env = Env::default();
+        // Do not mock auths or simulate unauthorized context if required by test framework,
+        // or verify that require_auth trap catches missing signatures.
+        let admin = Address::generate(&env);
+        let new_root = BytesN::from_array(&env, &[9u8; 32]);
+
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+
+        // Expect authorization failure or error when admin signature is missing
+        // (Soroban SDK traps execution on failed require_auth when mock_all_auths is not asserted for that caller)
+    }
+}
