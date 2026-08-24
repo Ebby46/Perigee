@@ -138,11 +138,13 @@ pub mod vault {
 pub mod reconciliation {
     use super::*;
     use crate::db::models;
+    use redis::{AsyncCommands, Client as RedisClient};
 
         #[derive(Clone)]
         pub struct ReconciliationRepo {
         report_table: ReconciliationReportsTable,
         disc_table: ReconciliationDiscrepanciesTable,
+        redis: Option<RedisClient>,
     }
 
     impl ReconciliationRepo {
@@ -153,7 +155,109 @@ pub mod reconciliation {
             Self {
                 report_table,
                 disc_table,
+                redis: None,
             }
+        }
+
+        pub fn with_redis(
+            report_table: ReconciliationReportsTable,
+            disc_table: ReconciliationDiscrepanciesTable,
+            redis_url: &str,
+        ) -> Result<Self, redis::RedisError> {
+            Ok(Self {
+                report_table,
+                disc_table,
+                redis: Some(RedisClient::open(redis_url)?),
+            })
+        }
+
+        async fn cached_report(&self, id: &str) -> Option<Option<models::ReconciliationReport>> {
+            let client = self.redis.as_ref()?;
+            let mut connection = client.get_multiplexed_async_connection().await.ok()?;
+            let value: Option<String> = connection.get(Self::report_cache_key(id)).await.ok()?;
+            value.map(|json| serde_json::from_str(&json).ok())
+        }
+
+        async fn cache_report(&self, report: &models::ReconciliationReport) {
+            let Some(client) = self.redis.as_ref() else {
+                return;
+            };
+            let Ok(json) = serde_json::to_string(report) else {
+                return;
+            };
+            let Ok(mut connection) = client.get_multiplexed_async_connection().await else {
+                return;
+            };
+            let _: Result<(), _> = connection
+                .set_ex(Self::report_cache_key(&report.id), json, 300)
+                .await;
+        }
+
+        async fn report_list_version(&self) -> Option<String> {
+            let client = self.redis.as_ref()?;
+            let mut connection = client.get_multiplexed_async_connection().await.ok()?;
+            connection
+                .get(Self::report_list_version_key())
+                .await
+                .ok()
+        }
+
+        async fn cached_reports(&self, limit: i64) -> Option<Vec<models::ReconciliationReport>> {
+            let version = self.report_list_version().await;
+            let client = self.redis.as_ref()?;
+            let mut connection = client.get_multiplexed_async_connection().await.ok()?;
+            let key = Self::report_list_cache_key(limit, version.as_deref().unwrap_or("0"));
+            let json: Option<String> = connection.get(key).await.ok()?;
+            serde_json::from_str(&json?).ok()
+        }
+
+        async fn cache_reports(
+            &self,
+            limit: i64,
+            version: Option<&str>,
+            reports: &[models::ReconciliationReport],
+        ) {
+            let Some(client) = self.redis.as_ref() else {
+                return;
+            };
+            let current_version = self
+                .report_list_version()
+                .await
+                .unwrap_or_else(|| "0".to_string());
+            if version.unwrap_or("0") != current_version {
+                return;
+            }
+            let Ok(mut connection) = client.get_multiplexed_async_connection().await else {
+                return;
+            };
+            let key = Self::report_list_cache_key(limit, &current_version);
+            let Ok(json) = serde_json::to_string(reports) else {
+                return;
+            };
+            let _: Result<(), _> = connection.set_ex(key, json, 300).await;
+        }
+
+        fn report_cache_key(id: &str) -> String {
+            format!("perigee:reconciliation:report:{id}")
+        }
+
+        fn report_list_version_key() -> &'static str {
+            "perigee:reconciliation:reports:version"
+        }
+
+        fn report_list_cache_key(limit: i64, version: &str) -> String {
+            format!("perigee:reconciliation:reports:{version}:{limit}")
+        }
+
+        async fn invalidate_report_cache(&self, id: &str) {
+            let Some(client) = self.redis.as_ref() else {
+                return;
+            };
+            let Ok(mut connection) = client.get_multiplexed_async_connection().await else {
+                return;
+            };
+            let _: Result<(), _> = connection.del(Self::report_cache_key(id)).await;
+            let _: Result<i64, _> = connection.incr(Self::report_list_version_key(), 1).await;
         }
 
         pub async fn persist_report(
@@ -177,16 +281,32 @@ pub mod reconciliation {
             ).await?;
 
             self.disc_table.insert_for_report(&report.id, discrepancies).await?;
+            self.invalidate_report_cache(&report.id).await;
 
             Ok(())
         }
 
         pub async fn find_by_id(&self, id: &str) -> Result<Option<models::ReconciliationReport>, sqlx::Error> {
-            self.report_table.find_by_id(id).await
+            if let Some(cached) = self.cached_report(id).await {
+                return Ok(cached);
+            }
+
+            let report = self.report_table.find_by_id(id).await?;
+            if let Some(ref report) = report {
+                self.cache_report(report).await;
+            }
+            Ok(report)
         }
 
         pub async fn list(&self, limit: i64) -> Result<Vec<models::ReconciliationReport>, sqlx::Error> {
-            self.report_table.list(limit).await
+            if let Some(reports) = self.cached_reports(limit).await {
+                return Ok(reports);
+            }
+
+            let version = self.report_list_version().await;
+            let reports = self.report_table.list(limit).await?;
+            self.cache_reports(limit, version.as_deref(), &reports).await;
+            Ok(reports)
         }
 
         pub async fn find_discrepancies(
