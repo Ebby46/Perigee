@@ -42,6 +42,8 @@
   "result.parseError": "⚠️ The backend returned a malformed response — it may have crashed mid-analysis. Check the analyzer logs, then retry.",
   "result.internalError": "💡 The analyzer hit an internal error during simulation. Check the analyzer logs for the panic trace.",
   "result.tip": "💡 Tip: Check if the backend is running and all parameters are correct.",
+  "result.contactSupport": "Contact support",
+  "result.viewDocs": "Documentation",
   "result.history": "History",
   "result.noAnalyses": "No analyses yet",
   "callGraph.title": "Cross-Contract Dependency Graph",
@@ -58,9 +60,12 @@
   "network.offlineBody": "Check your internet connection. Your work is saved locally.",
   "network.apiDownTitle": "Backend unavailable.",
   "network.apiDownBody": "Analysis and simulation features are temporarily unreachable. We'll retry automatically.",
+  "network.getHelp": "Get help",
   "network.retry": "Retry",
   "rpc.unreachableTitle": "Backend unreachable.",
   "rpc.unreachableBody": "Analysis features are temporarily unavailable. Previously loaded data is still accessible.",
   "rpc.checking": "Checking…",
+  "rpc.getHelp": "Get help",
+  "rpc.statusPage": "Status page",
   "rpc.retry": "Retry"
 }
