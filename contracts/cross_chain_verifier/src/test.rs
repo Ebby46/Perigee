@@ -1143,3 +1143,37 @@ mod test {
         // (Soroban SDK traps execution on failed require_auth when mock_all_auths is not asserted for that caller)
     }
 }
+
+#[cfg(test)]
+mod integration_test {
+    use super::*;
+    use soroban_sdk::{Env, BytesN};
+
+    #[test]
+    fn test_state_root_storage_and_retrieval_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let sequence_height: u32 = 42;
+        let mock_state_root = BytesN::from_array(&env, &[7u8; 32]);
+        let data_key = DataKey::StateRoot(sequence_height);
+
+        // 1. Verify state root does not exist prior to storage
+        let initial_fetch: Option<BytesN<32>> = env.storage().persistent().get(&data_key);
+        assert!(initial_fetch.is_none(), "Unset state root must return None");
+
+        // 2. Store state root for the specified sequence height
+        env.storage().persistent().set(&data_key, &mock_state_root);
+
+        // 3. Retrieve and validate the stored state root
+        let retrieved_root: BytesN<32> = env.storage().persistent().get(&data_key).unwrap();
+        assert_eq!(retrieved_root, mock_state_root, "Retrieved state root must match the stored value");
+
+        // 4. Update the state root for the same sequence height and verify overwrite
+        let updated_state_root = BytesN::from_array(&env, &[8u8; 32]);
+        env.storage().persistent().set(&data_key, &updated_state_root);
+
+        let final_retrieved_root: BytesN<32> = env.storage().persistent().get(&data_key).unwrap();
+        assert_eq!(final_retrieved_root, updated_state_root, "State root must be successfully updated");
+    }
+}
