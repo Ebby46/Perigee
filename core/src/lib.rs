@@ -13,7 +13,6 @@ pub mod parser;
 pub mod reconciliation;
 pub mod routing;
 pub mod rpc_provider;
-pub mod routing;
 pub mod runner;
 pub mod simulation;
 pub mod stellar_service;
