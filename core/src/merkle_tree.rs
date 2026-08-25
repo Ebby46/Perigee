@@ -177,6 +177,15 @@ impl MerkleTree {
         hex::encode(self.root)
     }
 
+    /// Return the root hash, or None if the tree has not been built.
+    pub fn root_hash(&self) -> Option<[u8; 32]> {
+        if self.leaf_count == 0 {
+            None
+        } else {
+            Some(self.root)
+        }
+    }
+
     /// Return the number of leaves in the tree.
     pub fn leaf_count(&self) -> usize {
         self.leaf_count

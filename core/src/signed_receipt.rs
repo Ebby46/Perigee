@@ -9,6 +9,7 @@ pub struct SignedReceipt {
     pub receiver_agent: String,
     pub sender_agent: String,
     pub signature: Vec<u8>,
+    pub signer_public_key: Vec<u8>,
 }
 
 impl SignedReceipt {
@@ -19,11 +20,18 @@ impl SignedReceipt {
             receiver_agent: receiver,
             sender_agent: sender,
             signature: Vec::new(),
+            signer_public_key: Vec::new(),
         }
     }
 
     pub fn verify_signature(&self) -> bool {
-        !self.signature.is_empty()
+        if self.signature.is_empty() || self.signer_public_key.is_empty() {
+            return false;
+        }
+        if self.signer_public_key.len() != 32 {
+            return false;
+        }
+        true
     }
 
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
@@ -53,6 +61,13 @@ impl ReceiptVerifier {
 
     pub fn verify(&self, receipt: &SignedReceipt) -> bool {
         if self.trusted_keys.is_empty() {
+            return false;
+        }
+        if !self
+            .trusted_keys
+            .iter()
+            .any(|k| k == &receipt.signer_public_key)
+        {
             return false;
         }
         receipt.verify_signature()
@@ -98,6 +113,7 @@ mod tests {
         );
         assert!(!receipt.verify_signature());
         receipt.signature = vec![1, 2, 3];
+        receipt.signer_public_key = vec![0u8; 32];
         assert!(receipt.verify_signature());
     }
 
@@ -111,5 +127,49 @@ mod tests {
             "s".to_string(),
         );
         assert!(!verifier.verify(&receipt));
+    }
+
+    #[test]
+    fn test_verifier_rejects_unknown_signer() {
+        let mut verifier = ReceiptVerifier::new();
+        verifier.add_trusted_key(vec![1u8; 32]);
+        let mut receipt = SignedReceipt::new(
+            "pay1".to_string(),
+            1000,
+            "r".to_string(),
+            "s".to_string(),
+        );
+        receipt.signature = vec![1, 2, 3];
+        receipt.signer_public_key = vec![2u8; 32];
+        assert!(!verifier.verify(&receipt));
+    }
+
+    #[test]
+    fn test_verifier_accepts_known_signer() {
+        let mut verifier = ReceiptVerifier::new();
+        let key = vec![1u8; 32];
+        verifier.add_trusted_key(key.clone());
+        let mut receipt = SignedReceipt::new(
+            "pay1".to_string(),
+            1000,
+            "r".to_string(),
+            "s".to_string(),
+        );
+        receipt.signature = vec![1, 2, 3];
+        receipt.signer_public_key = key;
+        assert!(verifier.verify(&receipt));
+    }
+
+    #[test]
+    fn test_verify_rejects_short_public_key() {
+        let mut receipt = SignedReceipt::new(
+            "pay1".to_string(),
+            1000,
+            "r".to_string(),
+            "s".to_string(),
+        );
+        receipt.signature = vec![1, 2, 3];
+        receipt.signer_public_key = vec![0u8; 16];
+        assert!(!receipt.verify_signature());
     }
 }

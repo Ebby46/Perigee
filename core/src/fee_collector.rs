@@ -2,9 +2,11 @@ use crate::fee_store::{FeeStore, LedgerFeeSample};
 use crate::rpc_provider::ProviderRegistry;
 use crate::stellar_service::{StellarService, StellarServiceConfig, StellarServiceError};
 use chrono::Utc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::Mutex;
 use tracing;
 
 /// Errors that can occur during fee collection
@@ -54,6 +56,7 @@ pub struct FeeCollector {
     stellar_service: Arc<StellarService>,
     config: FeeCollectorConfig,
     last_collected_sequence: std::sync::atomic::AtomicU64,
+    collecting: Arc<AtomicBool>,
 }
 
 impl FeeCollector {
@@ -74,6 +77,7 @@ impl FeeCollector {
             stellar_service,
             config,
             last_collected_sequence: std::sync::atomic::AtomicU64::new(0),
+            collecting: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -98,6 +102,24 @@ impl FeeCollector {
 
     /// Collect fee data from the latest ledger
     async fn collect_latest_fees(&self) -> Result<(), FeeCollectorError> {
+        // Prevent concurrent collection runs
+        if self.collecting.compare_exchange(
+            false,
+            true,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ).is_err() {
+            tracing::debug!("Collection already in progress, skipping");
+            return Ok(());
+        }
+
+        let result = self.collect_latest_fees_inner().await;
+
+        self.collecting.store(false, Ordering::Release);
+        result
+    }
+
+    async fn collect_latest_fees_inner(&self) -> Result<(), FeeCollectorError> {
         // Get latest ledger sequence
         let latest_sequence = self.get_latest_ledger_sequence().await?;
 

@@ -1,8 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, Vec};
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Vec, Bytes, String};
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Vec, Bytes, String, Map};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, Vec, Map};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,9 +39,8 @@ pub enum DataKey {
     ProcessedMessages(BytesN<32>),
     Nonces(Address),
     SignerCount,
-    StateRoot(u32), // block height mapped to state root
-    ProcessedNonce(u64), // track consumed nonces for replay protection
-    SignerRevocationNonce(Bytes), // per-signer monotonic nonce incremented on revocation
+    ProcessedNonce(u64),
+    SignerRevocationNonce(Bytes),
 }
 
 #[contract]
@@ -62,20 +59,6 @@ impl CrossChainVerifier {
 
     /// Update the state root for a specific block height.
     /// Only the admin (relayer network) can perform this action.
-    pub fn update_root(env: Env, block_height: u32, new_root: BytesN<32>) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
-        env.storage()
-            .instance()
-            .set(&DataKey::VerifyPaused, &paused);
-    }
-
-        env.storage()
-            .instance()
-            .get(&DataKey::VerifyPaused)
-            .unwrap_or(false)
-    }
-
     pub fn update_root(env: Env, block_height: u32, new_root: BytesN<32>) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -130,26 +113,6 @@ impl CrossChainVerifier {
         env.storage().persistent().set(&DataKey::SignerCount, &(count + 1));
 
         env.events().publish(("signer_added",), ());
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::SignerAlgorithm(public_key.clone()))
-        {
-            panic!("Signer already authorized");
-        }
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::SignerAlgorithm(public_key.clone()), &algorithm);
-
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::SignerCount)
-            .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&DataKey::SignerCount, &(count + 1));
     }
 
     /// Remove an authorized signer.
@@ -173,37 +136,16 @@ impl CrossChainVerifier {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
-        // Check if signer exists using indexed storage (O(1))
         if !env.storage().persistent().has(&DataKey::SignerAlgorithm(public_key.clone())) {
             panic!("Signer not found");
         }
 
-        // Remove signer from indexed storage (O(1))
         env.storage().persistent().remove(&DataKey::SignerAlgorithm(public_key.clone()));
 
-        // Increment revocation nonce to invalidate signatures created before revocation
         let current_nonce: u64 = env.storage().persistent().get(&DataKey::SignerRevocationNonce(public_key.clone())).unwrap_or(0);
         env.storage().persistent().set(&DataKey::SignerRevocationNonce(public_key), &(current_nonce + 1));
 
-        // Decrement signer count
         let count: u32 = env.storage().persistent().get(&DataKey::SignerCount).unwrap_or(0);
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::SignerAlgorithm(public_key.clone()))
-        {
-            panic!("Signer not found");
-        }
-
-        env.storage()
-            .persistent()
-            .remove(&DataKey::SignerAlgorithm(public_key));
-
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::SignerCount)
-            .unwrap_or(0);
         if count > 0 {
             env.storage()
                 .persistent()
@@ -233,6 +175,15 @@ impl CrossChainVerifier {
             .persistent()
             .get(&DataKey::SignerCount)
             .unwrap_or(0)
+    }
+
+    /// Check if a specific public key is an authorized signer.
+    /// 
+    /// **Performance:** O(1) - Constant time indexed storage lookup
+    pub fn has_authorized_signer(env: Env, public_key: Bytes) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::SignerAlgorithm(public_key))
     }
 
     /// Verify a signed cross-chain message with Merkle proof.
@@ -342,43 +293,6 @@ impl CrossChainVerifier {
     /// 
     /// Returns true if the signature is valid and the signer is authorized, false otherwise.
     fn verify_signature(env: &Env, signed_message: &SignedMessage) -> bool {
-        // Check if the signer's public key is authorized using indexed storage (O(1))
-    pub fn verify_message_and_consume(
-        env: Env,
-        block_height: u32,
-        nonce: u64,
-        leaf: BytesN<32>,
-        proof: Vec<BytesN<32>>,
-        proof_flags: Vec<bool>,
-    ) -> bool {
-        if Self::is_paused(env.clone()) {
-            panic!("verification paused");
-        }
-
-        if Self::is_nonce_processed(env.clone(), nonce) {
-            panic!("nonce already processed");
-        }
-
-        let valid = Self::verify_message(env.clone(), block_height, leaf, proof, proof_flags);
-        if !valid {
-            return false;
-        }
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::ProcessedNonce(nonce), &true);
-        true
-    }
-
-    pub fn is_nonce_processed(env: Env, nonce: u64) -> bool {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ProcessedNonce(nonce))
-            .unwrap_or(false)
-    }
-
-    fn verify_signature(env: &Env, signed_message: &SignedMessage) -> bool {
-        let signer_key_bytes = Bytes::from_array(env, &signed_message.signer_public_key.to_array());
         let signer_key_bytes =
             Bytes::from_array(&env, &signed_message.signer_public_key.to_array());
         let signer_algorithm: Option<SignatureAlgorithm> = env
@@ -388,25 +302,21 @@ impl CrossChainVerifier {
 
         let signer_algorithm = match signer_algorithm {
             Some(algo) => algo,
-            None => return false, // Signer not authorized
+            None => return false,
         };
 
-        // Check revocation nonce to prevent stale signer set after revocation
         let current_nonce: u64 = env
             .storage()
             .persistent()
             .get(&DataKey::SignerRevocationNonce(signed_message.signer_public_key.clone()))
             .unwrap_or(0);
         
-        // Reject if the message's nonce is less than the current revocation nonce
         if signed_message.revocation_nonce < current_nonce {
             return false;
         }
 
-        // Hash the message for signature verification
         let message_hash = Self::hash_message(&env, &signed_message.message);
 
-        // Verify signature based on algorithm
         match signer_algorithm {
             SignatureAlgorithm::Ed25519 => {
                 Self::verify_ed25519_signature(
@@ -423,14 +333,6 @@ impl CrossChainVerifier {
                     &signed_message.signature,
                     &signed_message.signer_public_key,
                 )
-                let message_bytes = Bytes::from_array(env, &message_hash.to_array());
-                env.crypto().ed25519_verify(
-                let _ = env.crypto().ed25519_verify(
-                    &signed_message.signer_public_key,
-                    &message_bytes,
-                    &signed_message.signature,
-                );
-                true
             }
         }
     }
@@ -528,21 +430,6 @@ impl CrossChainVerifier {
 
         // Return final hash
         env.crypto().sha256(&data).into()
-        let mut data = Bytes::new(env);
-        data.append(&Bytes::from_slice(env, b"CROSS_CHAIN_MESSAGE_V1"));
-        data.append(&Bytes::from_slice(env, &message.source_chain.to_be_bytes()));
-        data.append(&Bytes::from_slice(
-            env,
-            &message.destination_chain.to_be_bytes(),
-        ));
-        data.append(&Bytes::from_slice(env, &message.nonce.to_be_bytes()));
-        data.append(&Bytes::from_slice(env, &message.timestamp.to_be_bytes()));
-
-        let payload_hash = env.crypto().sha256(&message.payload).to_array();
-        data.append(&Bytes::from_slice(env, &payload_hash));
-
-        let digest = env.crypto().sha256(&data).to_array();
-        BytesN::from_array(env, &digest)
     }
 
     /// Verify a Merkle tree proof.
