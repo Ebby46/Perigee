@@ -998,3 +998,45 @@ fn test_revocation_nonce_prevents_stale_signatures() {
     let result = client.verify_signed_message(&signed_message, &block_height, &proof, &proof_flags);
     assert!(!result, "Old signature with stale nonce should be rejected after revocation");
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{Env, Address, Bytes};
+
+    #[test]
+    fn test_nonce_replay_prevention_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let nonce = 1001_u64;
+
+        // 1. Verify nonce has not been processed initially
+        let initially_processed = CrossChainVerifierContract::is_nonce_processed(env.clone(), nonce);
+        assert!(!initially_processed, "New nonce should not be marked as processed");
+
+        // 2. Simulate processing the nonce by setting it in storage
+        let key = DataKey::ProcessedNonce(nonce);
+        env.storage().persistent().set(&key, &true);
+
+        // 3. Verify nonce is now recognized as processed (replay prevention triggered)
+        let after_processing = CrossChainVerifierContract::is_nonce_processed(env.clone(), nonce);
+        assert!(after_processing, "Processed nonce must be recognized to prevent replays");
+    }
+
+    #[test]
+    fn test_multiple_distinct_nonces() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let nonce_a = 500_u64;
+        let nonce_b = 501_u64;
+
+        // Mark nonce_a as processed
+        env.storage().persistent().set(&DataKey::ProcessedNonce(nonce_a), &true);
+
+        // Nonce A should be processed, Nonce B should remain unprocessed
+        assert!(CrossChainVerifierContract::is_nonce_processed(env.clone(), nonce_a));
+        assert!(!CrossChainVerifierContract::is_nonce_processed(env.clone(), nonce_b));
+    }
+}

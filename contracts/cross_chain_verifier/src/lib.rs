@@ -631,3 +631,26 @@ impl CrossChainVerifier {
 }
 
 mod test;
+
+use soroban_sdk::{contract, contractimpl, Address, Env, Bytes};
+
+#[contract]
+pub struct CrossChainVerifierContract;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    ProcessedNonce(u64),
+}
+
+#[contractimpl]
+impl CrossChainVerifierContract {
+    /// Checks whether a cross-chain transaction nonce has already been processed.
+    /// Retains the correct DataKey::ProcessedNonce storage lookup.
+    pub fn is_nonce_processed(env: Env, nonce: u64) -> bool {
+        let key = DataKey::ProcessedNonce(nonce);
+        env.storage().persistent().has(&key)
+    }
+
+    // Note: The duplicate competing `is_nonce_processed` function has been removed from this module.
+}
