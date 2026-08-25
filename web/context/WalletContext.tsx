@@ -55,8 +55,8 @@ const walletStore = createStore<WalletState>((set, get) => ({
         selectedWalletId: moduleId,
         isModalOpen: false,
       });
-      localStorage.setItem("inheritx_wallet_address", walletAddress);
-      localStorage.setItem("inheritx_wallet_id", moduleId);
+      localStorage.setItem("perigee_wallet_address", walletAddress);
+      localStorage.setItem("perigee_wallet_id", moduleId);
       sessionStorage.setItem("perigee_wallet_id", moduleId);
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : "Connection failed";
@@ -77,8 +77,8 @@ const walletStore = createStore<WalletState>((set, get) => ({
     }
     }
     set({ address: null, selectedWalletId: null, error: null });
-    localStorage.removeItem("inheritx_wallet_address");
-    localStorage.removeItem("inheritx_wallet_id");
+    localStorage.removeItem("perigee_wallet_address");
+    localStorage.removeItem("perigee_wallet_id");
     sessionStorage.removeItem("perigee_wallet_id");
     clearLatestAnalysis();
   },
@@ -96,8 +96,24 @@ async function initWalletKit() {
   try {
     const walletKitModule = await import("@creit.tech/stellar-wallets-kit");
 
-    const savedAddress = localStorage.getItem("inheritx_wallet_address");
-    const savedWalletId = localStorage.getItem("inheritx_wallet_id");
+    // Migrate legacy inheritx_* keys to perigee_* prefix (Closes #208)
+    if (!localStorage.getItem("perigee_wallet_address")) {
+      const legacyAddress = localStorage.getItem("inheritx_wallet_address");
+      if (legacyAddress) {
+        localStorage.setItem("perigee_wallet_address", legacyAddress);
+        localStorage.removeItem("inheritx_wallet_address");
+      }
+    }
+    if (!localStorage.getItem("perigee_wallet_id")) {
+      const legacyWalletId = localStorage.getItem("inheritx_wallet_id");
+      if (legacyWalletId) {
+        localStorage.setItem("perigee_wallet_id", legacyWalletId);
+        localStorage.removeItem("inheritx_wallet_id");
+      }
+    }
+
+    const savedAddress = localStorage.getItem("perigee_wallet_address");
+    const savedWalletId = localStorage.getItem("perigee_wallet_id");
 
     const kitInstance = new walletKitModule.StellarWalletsKit({
       network: walletKitModule.WalletNetwork.TESTNET,
@@ -115,8 +131,8 @@ async function initWalletKit() {
         sessionStorage.setItem("perigee_wallet_id", savedWalletId);
       } catch (err) {
         logger.error("Auto-reconnect failed:", err);
-        localStorage.removeItem("inheritx_wallet_address");
-        localStorage.removeItem("inheritx_wallet_id");
+        localStorage.removeItem("perigee_wallet_address");
+        localStorage.removeItem("perigee_wallet_id");
         sessionStorage.removeItem("perigee_wallet_id");
       }
     }
