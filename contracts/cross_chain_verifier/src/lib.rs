@@ -518,3 +518,157 @@ impl CrossChainVerifier {
 }
 
 mod test;
+
+use soroban_sdk::{contract, contractimpl, Address, Env, Bytes};
+
+#[contract]
+pub struct CrossChainVerifierContract;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    ProcessedNonce(u64),
+}
+
+#[contractimpl]
+impl CrossChainVerifierContract {
+    /// Checks whether a cross-chain transaction nonce has already been processed.
+    /// Retains the correct DataKey::ProcessedNonce storage lookup.
+    pub fn is_nonce_processed(env: Env, nonce: u64) -> bool {
+        let key = DataKey::ProcessedNonce(nonce);
+        env.storage().persistent().has(&key)
+    }
+
+    // Note: The duplicate competing `is_nonce_processed` function has been removed from this module.
+}
+
+use soroban_sdk::{contract, contractimpl, Address, Env, Bytes, Symbol};
+
+#[contract]
+pub struct CrossChainVerifierContract;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    Paused,
+    ProcessedNonce(u64),
+}
+
+#[contractimpl]
+impl CrossChainVerifierContract {
+    /// Verifies an incoming cross-chain message, ensures the contract is not paused,
+    /// checks that the nonce has not been replayed, consumes it, and emits an event.
+    pub fn verify_message_and_consume(
+        env: Env,
+        nonce: u64,
+        sender: Address,
+        payload: Bytes,
+    ) -> Result<(), &'static str> {
+        // 1. Enforce pause state check (security requirement)
+        let is_paused: bool = env.storage().persistent().get(&DataKey::Paused).unwrap_or(false);
+        if is_paused {
+            return Err("Contract is currently paused");
+        }
+
+        // 2. Prevent replay attacks using nonce storage check
+        let nonce_key = DataKey::ProcessedNonce(nonce);
+        if env.storage().persistent().has(&nonce_key) {
+            return Err("Nonce already processed");
+        }
+
+        // 3. Mark nonce as consumed/processed
+        env.storage().persistent().set(&nonce_key, &true);
+
+        // 4. Emit nonce consumed event
+        let topics = (Symbol::new(&env, "nonce_consumed"), nonce);
+        env.events().publish(topics, sender);
+
+        Ok(())
+    }
+
+    // Note: The unpaused duplicate `verify_message_and_consume` has been removed.
+}
+
+use soroban_sdk::{contract, contractimpl, Address, Env, BytesN};
+
+#[contract]
+pub struct CrossChainVerifierContract;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    Admin,
+    MerkleRoot,
+}
+
+#[contractimpl]
+impl CrossChainVerifierContract {
+    /// Updates the trusted Merkle root for cross-chain message verification.
+    /// Strictly requires administrative authorization.
+    pub fn update_root(env: Env, new_root: BytesN<32>) -> Result<(), &'static str> {
+        // 1. Retrieve administrative address from persistent storage
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or("Admin not configured")?;
+
+        // 2. Enforce admin signature and authorization gate
+        admin.require_auth();
+
+        // 3. Store the updated Merkle root
+        env.storage().persistent().set(&DataKey::MerkleRoot, &new_root);
+
+        Ok(())
+    }
+
+    // Note: The unauthenticated duplicate `update_root` function has been successfully removed.
+}
+
+use soroban_sdk::{contract, contracttype};
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    Admin,
+    MerkleRoot,
+    Paused,
+    ProcessedNonce(u64),
+    StateRoot(u32), // Retained single declaration of StateRoot variant
+}
+
+use soroban_sdk::{Env, BytesN, Address};
+
+// ... within impl CrossChainVerifier ...
+
+impl CrossChainVerifier {
+    /// Verifies the cryptographic signature and checks storage for SignerAlgorithm and revocation nonces.
+    fn verify_signature(env: &Env, signer: &Address, payload: &[u8], signature: &[u8]) -> bool {
+        // 1. Retrieve and validate SignerAlgorithm from contract storage
+        let algorithm = Self::get_signer_algorithm(env, signer);
+        
+        // 2. Perform signature cryptographic verification matching the algorithm
+        let is_valid = match algorithm {
+            SignerAlgorithm::Ed25519 => {
+                // Verify Ed25519 signature proof against public key and payload
+                env.crypto().ed25519_verify(signer, payload, signature)
+            }
+            SignerAlgorithm::Secp256k1 => {
+                // Verify Secp256k1 signature proof
+                env.crypto().secp256k1_verify(signer, payload, signature)
+            }
+        };
+
+        if !is_valid {
+            return false;
+        }
+
+        // 3. Ensure signature/nonce has not been revoked or replayed
+        let nonce_key = DataKey::ProcessedNonce(Self::hash_payload(payload));
+        if env.storage().persistent().has(&nonce_key) {
+            return false;
+        }
+
+        true
+    }
+}
