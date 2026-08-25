@@ -738,3 +738,14 @@ impl CrossChainVerifierContract {
     // Note: The unauthenticated duplicate `update_root` function has been successfully removed.
 }
 
+use soroban_sdk::{contract, contracttype};
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    Admin,
+    MerkleRoot,
+    Paused,
+    ProcessedNonce(u64),
+    StateRoot(u32), // Retained single declaration of StateRoot variant
+}
