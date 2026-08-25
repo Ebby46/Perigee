@@ -3,25 +3,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useTranslations } from "next-intl";
 import { supportLinks } from "../lib/config";
-
-/**
- * NetworkStatusBanner
- *
- * Displays a non-blocking banner when the browser loses network connectivity
- * or when the backend API is unreachable.  Auto-dismisses when connectivity
- * is restored.
- *
- * Handles three states:
- *  - "online"   : navigator.onLine === true  — banner hidden
- *  - "offline"  : navigator.onLine === false — "No internet" message
- *  - "api-down" : online but API unreachable — "Backend unavailable" message
- *
- * Resolves WEB-23 (#109): no retry/reconnect UX for network failures.
- *
- * Usage:
- *   Render once near the top of _app.tsx:
- *   <NetworkStatusBanner apiUrl={API_URL} />
- */
+import { getStage } from "../lib/contracts.config";
 
 type NetworkStatus = "online" | "offline" | "api-down";
 
@@ -64,6 +46,31 @@ export function NetworkStatusBanner({ apiUrl }: NetworkStatusBannerProps) {
   const [status, setStatus] = useState<NetworkStatus>("online");
   const [retryCount, setRetryCount] = useState(0);
 
+  const stage = getStage();
+  const isProduction = process.env.NODE_ENV === "production";
+  const isTestnet = stage === "testnet";
+
+  const networkLabel =
+    stage === "mainnet"
+      ? t("network.mainnetLabel")
+      : stage === "testnet"
+        ? t("network.testnetLabel")
+        : t("network.localLabel");
+
+  const networkDotColor =
+    stage === "mainnet"
+      ? "bg-emerald-400"
+      : stage === "testnet"
+        ? "bg-amber-400"
+        : "bg-slate-400";
+
+  const networkTextColor =
+    stage === "mainnet"
+      ? "text-emerald-300"
+      : stage === "testnet"
+        ? "text-amber-300"
+        : "text-slate-400";
+
   const checkStatus = useCallback(async () => {
     if (!navigator.onLine) {
       setStatus("offline");
@@ -73,11 +80,9 @@ export function NetworkStatusBanner({ apiUrl }: NetworkStatusBannerProps) {
     setStatus(up ? "online" : "api-down");
   }, [apiUrl]);
 
-  // Listen to browser online/offline events
   useEffect(() => {
     const goOnline = () => {
       setStatus("online");
-      // Re-check API immediately when browser comes back online
       checkStatus();
     };
     const goOffline = () => setStatus("offline");
@@ -90,7 +95,6 @@ export function NetworkStatusBanner({ apiUrl }: NetworkStatusBannerProps) {
     };
   }, [checkStatus]);
 
-  // Periodic API health check
   useEffect(() => {
     checkStatus();
     const interval = setInterval(checkStatus, API_CHECK_INTERVAL_MS);
@@ -101,88 +105,129 @@ export function NetworkStatusBanner({ apiUrl }: NetworkStatusBannerProps) {
     setRetryCount((c) => c + 1);
   }, []);
 
-  if (status === "online") return null;
-
-  const { title, body } = messages[status];
-  const isOffline = status === "offline";
-
-  const displayTitle = t(title);
-  const displayBody = t(body);
-
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
-      className={[
-        "flex items-start gap-3 px-4 py-3 text-sm",
-        isOffline
-          ? "bg-slate-800 border-b border-slate-700 text-slate-200"
-          : "bg-amber-900/80 border-b border-amber-700 text-amber-100",
-      ].join(" ")}
-    >
-      {/* Icon */}
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={2}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        className={[
-"h-5 w-5 shrink-0 mt-0.5",
-          isOffline ? "text-slate-400" : "text-amber-400",
-        ].join(" ")}
-        aria-hidden="true"
+  if (isTestnet && isProduction) {
+    return (
+      <div
+        role="alert"
+        aria-live="assertive"
+        aria-atomic="true"
+        className="flex items-start gap-3 px-4 py-3 text-sm bg-red-900/80 border-b border-red-700 text-red-100"
       >
-        {isOffline ? (
-          <>
-            <line x1="1" y1="1" x2="23" y2="23" />
-            <path d="M16.72 11.06A10.94 10.94 0 0119 12.55" />
-            <path d="M5 12.55a10.94 10.94 0 015.17-2.39" />
-            <path d="M10.71 5.05A16 16 0 0122.56 9" />
-            <path d="M1.42 9a15.91 15.91 0 014.7-2.88" />
-            <path d="M8.53 16.11a6 6 0 016.95 0" />
-            <line x1="12" y1="20" x2="12.01" y2="20" />
-          </>
-        ) : (
-          <>
-            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-            <line x1="12" y1="9" x2="12" y2="13" />
-            <line x1="12" y1="17" x2="12.01" y2="17" />
-          </>
-        )}
-      </svg>
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="h-5 w-5 shrink-0 mt-0.5 text-red-400"
+          aria-hidden="true"
+        >
+          <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+          <line x1="12" y1="9" x2="12" y2="13" />
+          <line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
+        <div className="flex-1">
+          <span className="font-semibold">{t("network.testnetWarningTitle")}</span>{" "}
+          <span className="opacity-90">{t("network.testnetWarningBody")}</span>
+        </div>
+      </div>
+    );
+  }
 
-      {/* Message */}
-      <div className="flex-1">
-        <span className="font-semibold">{displayTitle}</span>{" "}
-        <span className="opacity-80">{displayBody}</span>{" "}
+  if (status !== "online") {
+    const { title, body } = messages[status];
+    const isOffline = status === "offline";
+
+    const displayTitle = t(title);
+    const displayBody = t(body);
+
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className={[
+          "flex items-start gap-3 px-4 py-3 text-sm",
+          isOffline
+            ? "bg-slate-800 border-b border-slate-700 text-slate-200"
+            : "bg-amber-900/80 border-b border-amber-700 text-amber-100",
+        ].join(" ")}
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className={[
+            "h-5 w-5 shrink-0 mt-0.5",
+            isOffline ? "text-slate-400" : "text-amber-400",
+          ].join(" ")}
+          aria-hidden="true"
+        >
+          {isOffline ? (
+            <>
+              <line x1="1" y1="1" x2="23" y2="23" />
+              <path d="M16.72 11.06A10.94 10.94 0 0119 12.55" />
+              <path d="M5 12.55a10.94 10.94 0 015.17-2.39" />
+              <path d="M10.71 5.05A16 16 0 0122.56 9" />
+              <path d="M1.42 9a15.91 15.91 0 014.7-2.88" />
+              <path d="M8.53 16.11a6 6 0 016.95 0" />
+              <line x1="12" y1="20" x2="12.01" y2="20" />
+            </>
+          ) : (
+            <>
+              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </>
+          )}
+        </svg>
+
+        <div className="flex-1">
+          <span className="font-semibold">{displayTitle}</span>{" "}
+          <span className="opacity-80">{displayBody}</span>{" "}
+          {!isOffline && (
+            <a
+              href={supportLinks.supportUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-2 hover:opacity-100 opacity-90"
+            >
+              {t("network.getHelp")}
+            </a>
+          )}
+        </div>
+
         {!isOffline && (
-          <a
-            href={supportLinks.supportUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="underline underline-offset-2 hover:opacity-100 opacity-90"
+          <button
+            type="button"
+            onClick={handleRetry}
+            className="shrink-0 rounded border border-amber-600 px-2.5 py-1 text-xs font-medium
+                       text-amber-200 hover:bg-amber-800 focus:outline-none focus:ring-2
+                       focus:ring-amber-400 disabled:opacity-50 transition-colors"
           >
-            {t("network.getHelp")}
-          </a>
+            {t("network.retry")}
+          </button>
         )}
       </div>
+    );
+  }
 
-      {/* Retry (API-down only) */}
-      {!isOffline && (
-        <button
-          type="button"
-          onClick={handleRetry}
-          className="shrink-0 rounded border border-amber-600 px-2.5 py-1 text-xs font-medium
-                     text-amber-200 hover:bg-amber-800 focus:outline-none focus:ring-2
-                     focus:ring-amber-400 disabled:opacity-50 transition-colors"
-        >
-          {t("network.retry")}
-        </button>
-      )}
+  return (
+    <div className="flex items-center justify-between px-4 py-2 text-sm bg-slate-900 border-b border-slate-800 text-slate-300">
+      <div className="flex items-center gap-2">
+        <span
+          className={["h-2 w-2 rounded-full", networkDotColor].join(" ")}
+          aria-hidden="true"
+        />
+        <span className={networkTextColor}>{networkLabel}</span>
+      </div>
+      <span className="text-xs opacity-70">{t("network.onlineLabel")}</span>
     </div>
   );
 }
