@@ -785,3 +785,42 @@ impl CrossChainVerifier {
         true
     }
 }
+
+use soroban_sdk::{Env, Address, symbol_short};
+
+// ... within impl CrossChainVerifier ...
+
+pub fn remove_authorized_signer(env: Env, admin: Address, signer: Address) -> Result<(), ContractError> {
+    admin.require_auth();
+
+    // 1. Verify admin authorization
+    Self::validate_admin(&env, &admin)?;
+
+    // 2. Check if the signer exists in storage before removal
+    let signer_key = DataKey::AuthorizedSigner(signer.clone());
+    if !env.storage().persistent().has(&signer_key) {
+        return Err(ContractError::SignerNotFound);
+    }
+
+    // 3. Remove signer from persistent storage exactly once
+    env.storage().persistent().remove(&signer_key);
+
+    // 4. Safely decrement SignerCount with underflow protection
+    let count_key = DataKey::SignerCount;
+    let mut count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    
+    if count > 0 {
+        count -= 1;
+        env.storage().persistent().set(&count_key, &count);
+    } else {
+        return Err(ContractError::InvalidSignerCount);
+    }
+
+    env.events().publish(
+        (symbol_short!("signer"), symbol_short!("removed")),
+        signer,
+    );
+
+    Ok(())
+}
+
