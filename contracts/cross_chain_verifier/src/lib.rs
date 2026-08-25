@@ -856,3 +856,18 @@ pub fn add_authorized_signer(env: Env, admin: Address, signer: Address, algorith
 
     Ok(())
 }
+
+use soroban_sdk::{Env, Bytes, BytesN};
+
+// ... within impl CrossChainVerifier ...
+
+impl CrossChainVerifier {
+    /// Hashes the cross-chain message payload consistently with the v1 domain separator.
+    fn hash_message(env: &Env, payload: &[u8]) -> BytesN<32> {
+        let mut message = Bytes::new(env);
+        message.extend_from_slice(b"CROSS_CHAIN_MESSAGE_V1");
+        message.extend_from_slice(payload);
+        
+        env.crypto().keccak256(&message).into()
+    }
+}
