@@ -72,6 +72,21 @@ function validateField(type, value) {
   }
 }
 
+/**
+ * Sanitizes user-controlled strings before they are sent to the API.
+ * Strips HTML tags and event handler attributes while preserving benign text.
+ * @param {string} value
+ * @param {string} fieldName
+ * @returns {string}
+ */
+function sanitizeUserInput(value, fieldName = 'input') {
+  const next = String(value ?? '').replace(/<[^>]*>/g, '');
+  if (next !== String(value ?? '')) {
+    console.warn(`[security] Sanitized ${fieldName}: removed unsafe HTML/JS content.`);
+  }
+  return next;
+}
+
 // ---------------------------------------------------------------------------
 // Test fixtures
 // ---------------------------------------------------------------------------
@@ -255,5 +270,19 @@ describe('validateField', () => {
   test('returns null for empty value on any validated type (required handled by HTML)', () => {
     assert.equal(validateField('address', ''), null);
     assert.equal(validateField('asset_code', ''), null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sanitizeUserInput (security regression)
+// ---------------------------------------------------------------------------
+
+describe('sanitizeUserInput', () => {
+  test('strips XSS payloads before API submission', () => {
+    const dirty = 'hello<img src=x onerror=alert(1)>world';
+    const sanitized = sanitizeUserInput(dirty, 'amount');
+
+    assert.equal(sanitized, 'helloworld');
+    assert.doesNotMatch(sanitized, /<img|onerror|alert\(/i);
   });
 });

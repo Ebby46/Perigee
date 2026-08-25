@@ -11,6 +11,7 @@ import { SEO } from "../components/SEO";
 import { UploadZone } from "../components/upload-zone";
 import { analyzeService } from "../lib/api";
 import { contractIds } from "../lib/contracts.config";
+import { sanitizeUserInput } from "../lib/sanitize";
 import {
   MOCK_CONTRACT_FUNCTIONS,
   generateMockResult,
@@ -42,16 +43,24 @@ export default function Home() {
     async (inputs: SimulationInputs, customWasmData?: string) => {
       setLoading(true);
       const activeWasmData = customWasmData ?? wasmData;
+      const sanitizedInputs = Object.fromEntries(
+        Object.entries(inputs).map(([key, value]) => [
+          key,
+          typeof value === "string" ? sanitizeUserInput(value, key) : value,
+        ]),
+      ) as SimulationInputs;
+
       try {
         const report = activeWasmData
           ? await analyzeService.analyzeWasm({
               wasm_bytes: activeWasmData,
               function_name: selectedFunction.name,
-              args: Object.values(inputs).map((value) => String(value)),
+              args: Object.values(sanitizedInputs).map((value) => String(value)),
             })
           : await analyzeService.analyze({
               contract_id: contractId,
               function_name: selectedFunction.name,
+              args: Object.values(sanitizedInputs).map((value) => String(value)),
             });
 
         const result: InvocationResult = {
