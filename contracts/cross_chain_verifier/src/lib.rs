@@ -749,3 +749,39 @@ pub enum DataKey {
     ProcessedNonce(u64),
     StateRoot(u32), // Retained single declaration of StateRoot variant
 }
+
+use soroban_sdk::{Env, BytesN, Address};
+
+// ... within impl CrossChainVerifier ...
+
+impl CrossChainVerifier {
+    /// Verifies the cryptographic signature and checks storage for SignerAlgorithm and revocation nonces.
+    fn verify_signature(env: &Env, signer: &Address, payload: &[u8], signature: &[u8]) -> bool {
+        // 1. Retrieve and validate SignerAlgorithm from contract storage
+        let algorithm = Self::get_signer_algorithm(env, signer);
+        
+        // 2. Perform signature cryptographic verification matching the algorithm
+        let is_valid = match algorithm {
+            SignerAlgorithm::Ed25519 => {
+                // Verify Ed25519 signature proof against public key and payload
+                env.crypto().ed25519_verify(signer, payload, signature)
+            }
+            SignerAlgorithm::Secp256k1 => {
+                // Verify Secp256k1 signature proof
+                env.crypto().secp256k1_verify(signer, payload, signature)
+            }
+        };
+
+        if !is_valid {
+            return false;
+        }
+
+        // 3. Ensure signature/nonce has not been revoked or replayed
+        let nonce_key = DataKey::ProcessedNonce(Self::hash_payload(payload));
+        if env.storage().persistent().has(&nonce_key) {
+            return false;
+        }
+
+        true
+    }
+}
