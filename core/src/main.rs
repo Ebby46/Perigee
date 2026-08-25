@@ -2226,10 +2226,12 @@ async fn main() {
     let manager_store = Arc::new(manager_store::ManagerStore::new(db_schema.managers()));
     let fee_analytics_engine = FeeAnalyticsEngine::new();
 
-    let reconciliation_repo = db::reconciliation::ReconciliationRepo::new(
+    let reconciliation_repo = db::reconciliation::ReconciliationRepo::with_redis(
         db_schema.reconciliation_reports(),
         db_schema.reconciliation_discrepancies(),
-    );
+        &config.redis_url,
+    )
+    .expect("Failed to initialize reconciliation report cache");
     let reconciler = Arc::new(reconciliation::FeeReconciler::new(
         Arc::clone(&fee_store),
         reconciliation_repo.clone(),
