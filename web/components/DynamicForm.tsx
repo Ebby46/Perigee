@@ -3,8 +3,9 @@
 import React from "react"
 
 import { useState } from 'react';
-import type { ContractFunction, SimulationInputs } from '../lib/sorobantypes';
 import { Loader2 } from 'lucide-react';
+import { sanitizeUserInput } from '../lib/sanitize';
+import type { ContractFunction, SimulationInputs } from '../lib/sorobantypes';
 
 interface DynamicFormProps {
   func: ContractFunction;
@@ -105,11 +106,15 @@ export function DynamicForm({ func, onSubmit, loading }: DynamicFormProps) {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
-    // Run validation for every field before submitting
+    // Run validation for every field before submitting.
+    // Sanitization is applied before the form payload leaves the browser.
+    const sanitizedInputs: SimulationInputs = {};
     const errors: Record<string, string> = {};
     func.inputs.forEach((input) => {
       const raw = String(formData[input.name] ?? '');
-      const error = validateField(input.type, raw);
+      const sanitized = sanitizeUserInput(raw, input.name);
+      sanitizedInputs[input.name] = sanitized;
+      const error = validateField(input.type, sanitized);
       if (error) errors[input.name] = error;
     });
 
@@ -118,7 +123,7 @@ export function DynamicForm({ func, onSubmit, loading }: DynamicFormProps) {
       return;
     }
 
-    onSubmit(formData);
+    onSubmit(sanitizedInputs);
   };
 
   // Shared input style — border turns red when there is a field error

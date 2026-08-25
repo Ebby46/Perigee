@@ -35,5 +35,21 @@ export function sanitizeText(dirty: string): string {
   return DOMPurify.sanitize(dirty, { ALLOWED_TAGS: [] });
 }
 
+/** Default DOMPurify-based sanitizer for arbitrary user-controlled text. */
+export function sanitize(dirty: string, context = "user input"): string {
+  const sanitized = sanitizeText(dirty);
+
+  if (sanitized !== dirty) {
+    console.warn(`[security] Sanitized ${context}: removed unsafe HTML/JS content.`);
+  }
+
+  return sanitized;
+}
+
+/** Convenience helper for form/API arguments. */
+export function sanitizeUserInput(value: string, fieldName = "input"): string {
+  return sanitize(value, `${fieldName} value`);
+}
+
 /** Default export for convenience. */
-export default sanitizeHtml;
+export default sanitize;
