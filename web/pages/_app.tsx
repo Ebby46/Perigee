@@ -9,6 +9,7 @@ import { NextIntlClientProvider } from "next-intl";
 import { API_URL } from "../lib/api";
 import { useRouter } from "next/router";
 import { useEffect } from "react";
+import { FeatureFlagProvider } from "../features/feature-flags";
 
 /**
  * Initialize @axe-core/react in development so accessibility violations
@@ -41,21 +42,23 @@ export default function App({ Component, pageProps }: AppProps) {
   const router = useRouter();
 
   return (
-    <NextIntlClientProvider
-      locale={router?.locale ?? "en"}
-      messages={pageProps.messages ?? {}}
-      timeZone="UTC"
-    >
-      <WalletProvider>
-        {/* Network status and API availability (#109) */}
-        <NetworkStatusBanner apiUrl={API_URL} />
-        {/* Graceful RPC fallback — shown when the backend is unreachable (#115) */}
-        <RpcFallbackBanner apiUrl={API_URL} />
-        <ErrorBoundary>
-          <Component {...pageProps} />
-          <Analytics />
-        </ErrorBoundary>
-      </WalletProvider>
-    </NextIntlClientProvider>
+    <FeatureFlagProvider>
+      <NextIntlClientProvider
+        locale={router?.locale ?? "en"}
+        messages={pageProps.messages ?? {}}
+        timeZone="UTC"
+      >
+        <WalletProvider>
+          {/* Network status and API availability (#109) */}
+          <NetworkStatusBanner apiUrl={API_URL} />
+          {/* Graceful RPC fallback — shown when the backend is unreachable (#115) */}
+          <RpcFallbackBanner apiUrl={API_URL} />
+          <ErrorBoundary>
+            <Component {...pageProps} />
+            <Analytics />
+          </ErrorBoundary>
+        </WalletProvider>
+      </NextIntlClientProvider>
+    </FeatureFlagProvider>
   );
 }
