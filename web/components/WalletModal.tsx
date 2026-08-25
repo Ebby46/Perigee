@@ -3,7 +3,6 @@ import Image from "next/image";
 
 import { useWalletStore } from "../context/WalletContext";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
-import { useWallet } from "../context/WalletContext";
 import { Wallet, Check, AlertCircle } from "lucide-react";
 import React from "react";
 import UserIcon from "./userIcon";
@@ -16,14 +15,6 @@ export function WalletModal() {
   const connect = useWalletStore((s) => s.connect);
   const isConnecting = useWalletStore((s) => s.isConnecting);
   const error = useWalletStore((s) => s.error);
-  const {
-    isModalOpen,
-    closeModal,
-    supportedWallets,
-    connect,
-    isConnecting,
-    error,
-  } = useWallet();
   const shouldReduceMotion = useReducedMotion();
 
   const [activeSelection, setActiveSelection] = React.useState<string | null>(
