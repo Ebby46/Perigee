@@ -1040,3 +1040,64 @@ mod test {
         assert!(!CrossChainVerifierContract::is_nonce_processed(env.clone(), nonce_b));
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{Env, Address, Bytes, Symbol};
+
+    #[test]
+    fn test_verify_message_success_and_nonce_consumption() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let sender = Address::generate(&env);
+        let nonce = 2002_u64;
+        let payload = Bytes::from_slice(&env, b"cross-chain-payload-data");
+
+        // 1. Ensure contract is unpaused by default
+        let result = CrossChainVerifierContract::verify_message_and_consume(
+            env.clone(),
+            nonce,
+            sender.clone(),
+            payload.clone(),
+        );
+        assert!(result.is_ok(), "First message verification should succeed");
+
+        // 2. Verify nonce is marked as processed/consumed
+        let nonce_key = DataKey::ProcessedNonce(nonce);
+        assert!(env.storage().persistent().has(&nonce_key), "Nonce must be recorded in persistent storage");
+
+        // 3. Attempt replay attack with same nonce and verify rejection
+        let replay_result = CrossChainVerifierContract::verify_message_and_consume(
+            env.clone(),
+            nonce,
+            sender.clone(),
+            payload,
+        );
+        assert_eq!(replay_result, Err("Nonce already processed"), "Replay attack must be blocked");
+    }
+
+    #[test]
+    fn test_verify_message_blocked_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let sender = Address::generate(&env);
+        let nonce = 3003_u64;
+        let payload = Bytes::from_slice(&env, b"emergency-payload");
+
+        // 1. Set contract state to paused
+        env.storage().persistent().set(&DataKey::Paused, &true);
+
+        // 2. Attempt verification while paused
+        let result = CrossChainVerifierContract::verify_message_and_consume(
+            env.clone(),
+            nonce,
+            sender,
+            payload,
+        );
+
+        assert_eq!(result, Err("Contract is currently paused"), "Paused contract must reject all incoming messages");
+    }
+}

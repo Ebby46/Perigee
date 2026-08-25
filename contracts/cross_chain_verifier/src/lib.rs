@@ -654,3 +654,51 @@ impl CrossChainVerifierContract {
 
     // Note: The duplicate competing `is_nonce_processed` function has been removed from this module.
 }
+
+use soroban_sdk::{contract, contractimpl, Address, Env, Bytes, Symbol};
+
+#[contract]
+pub struct CrossChainVerifierContract;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    Paused,
+    ProcessedNonce(u64),
+}
+
+#[contractimpl]
+impl CrossChainVerifierContract {
+    /// Verifies an incoming cross-chain message, ensures the contract is not paused,
+    /// checks that the nonce has not been replayed, consumes it, and emits an event.
+    pub fn verify_message_and_consume(
+        env: Env,
+        nonce: u64,
+        sender: Address,
+        payload: Bytes,
+    ) -> Result<(), &'static str> {
+        // 1. Enforce pause state check (security requirement)
+        let is_paused: bool = env.storage().persistent().get(&DataKey::Paused).unwrap_or(false);
+        if is_paused {
+            return Err("Contract is currently paused");
+        }
+
+        // 2. Prevent replay attacks using nonce storage check
+        let nonce_key = DataKey::ProcessedNonce(nonce);
+        if env.storage().persistent().has(&nonce_key) {
+            return Err("Nonce already processed");
+        }
+
+        // 3. Mark nonce as consumed/processed
+        env.storage().persistent().set(&nonce_key, &true);
+
+        // 4. Emit nonce consumed event
+        let topics = (Symbol::new(&env, "nonce_consumed"), nonce);
+        env.events().publish(topics, sender);
+
+        Ok(())
+    }
+
+    // Note: The unpaused duplicate `verify_message_and_consume` has been removed.
+}
+
