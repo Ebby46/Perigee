@@ -12,11 +12,87 @@ interface DynamicFormProps {
   loading?: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Validation helpers (also exported for unit testing)
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate a Stellar address.
+ *
+ * Stellar uses Strkey encoding (base32):
+ *   - Public keys (Ed25519)  start with 'G' and are 56 characters long.
+ *   - Contract addresses     start with 'C' and are 56 characters long.
+ *
+ * Returns an error string on failure, or null when valid.
+ */
+export function validateStellarAddress(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null; // let `required` handle emptiness
+
+  // Stellar's strkey encoding uses standard RFC 4648 base32: A-Z and digits 2-7.
+  const STRKEY_RE = /^[A-Z2-7]{56}$/;
+
+  if (trimmed.startsWith('G') || trimmed.startsWith('C')) {
+    if (!STRKEY_RE.test(trimmed)) {
+      return `Must be 56 base32 characters starting with ${trimmed[0]}.`;
+    }
+    return null;
+  }
+
+  return "Stellar address must start with 'G' (Ed25519 public key) or 'C' (contract).";
+}
+
+/**
+ * Validate a Stellar asset code (alphanumeric, 1–12 characters).
+ *
+ * Returns an error string on failure, or null when valid.
+ */
+export function validateAssetCode(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null; // let `required` handle emptiness
+
+  if (!/^[A-Za-z0-9]{1,12}$/.test(trimmed)) {
+    if (trimmed.length > 12) {
+      return 'Asset code must be 1–12 characters.';
+    }
+    return 'Asset code must contain only letters and numbers (A-Z, 0-9).';
+  }
+  return null;
+}
+
+/**
+ * Validate a single field value given its SorobanType.
+ * Returns an error string, or null if valid.
+ */
+export function validateField(type: string, value: string): string | null {
+  switch (type) {
+    case 'address':
+      return validateStellarAddress(value);
+    case 'asset_code':
+      return validateAssetCode(value);
+    default:
+      return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
 export function DynamicForm({ func, onSubmit, loading }: DynamicFormProps) {
   const [formData, setFormData] = useState<SimulationInputs>({});
+  // Map of field name → error message (empty string or undefined = no error)
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
-  const handleChange = (name: string, value: string | number | boolean) => {
+  const handleChange = (name: string, type: string, value: string | number | boolean) => {
     setFormData((prev) => ({ ...prev, [name]: value }));
+
+    // Validate on change so errors clear as the user types valid input
+    const error = validateField(type, String(value));
+    setFieldErrors((prev) => ({
+      ...prev,
+      [name]: error ?? '',
+    }));
   };
 
   const fieldValue = (name: string) => {
@@ -24,10 +100,37 @@ export function DynamicForm({ func, onSubmit, loading }: DynamicFormProps) {
     return typeof value === 'boolean' ? String(value) : value ?? '';
   };
 
+  const hasErrors = Object.values(fieldErrors).some((e) => e !== '');
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Run validation for every field before submitting
+    const errors: Record<string, string> = {};
+    func.inputs.forEach((input) => {
+      const raw = String(formData[input.name] ?? '');
+      const error = validateField(input.type, raw);
+      if (error) errors[input.name] = error;
+    });
+
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors((prev) => ({ ...prev, ...errors }));
+      return;
+    }
+
     onSubmit(formData);
   };
+
+  // Shared input style — border turns red when there is a field error
+  const inputStyle = (name: string): React.CSSProperties => ({
+    padding: '8px 12px',
+    border: `1px solid ${fieldErrors[name] ? '#f85149' : '#30363d'}`,
+    borderRadius: '6px',
+    fontSize: '14px',
+    boxSizing: 'border-box',
+    backgroundColor: '#0d1117',
+    color: '#c9d1d9',
+  });
 
   return (
     <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -44,6 +147,7 @@ export function DynamicForm({ func, onSubmit, loading }: DynamicFormProps) {
             }}
           >
             <label
+              htmlFor={`field-${input.name}`}
               style={{
                 fontSize: '14px',
                 fontWeight: '500',
@@ -68,76 +172,64 @@ export function DynamicForm({ func, onSubmit, loading }: DynamicFormProps) {
                 {input.description}
               </p>
             )}
+
+            {/* ── Field inputs ── */}
             {input.type === 'address' ? (
               <input
+                id={`field-${input.name}`}
                 type="text"
-                placeholder="Enter Stellar address (G...)"
+                placeholder="Enter Stellar address (G... or C...)"
                 value={fieldValue(input.name)}
-                onChange={(e) => handleChange(input.name, e.target.value)}
+                onChange={(e) => handleChange(input.name, input.type, e.target.value)}
                 required={!input.optional}
                 disabled={loading}
-                style={{
-                  padding: '8px 12px',
-                  border: '1px solid #30363d',
-                  borderRadius: '6px',
-                  fontSize: '14px',
-                  fontFamily: 'monospace',
-                  boxSizing: 'border-box',
-                  backgroundColor: '#0d1117',
-                  color: '#c9d1d9',
-                }}
+                aria-invalid={Boolean(fieldErrors[input.name])}
+                aria-describedby={fieldErrors[input.name] ? `error-${input.name}` : undefined}
+                style={{ ...inputStyle(input.name), fontFamily: 'monospace' }}
+              />
+            ) : input.type === 'asset_code' ? (
+              <input
+                id={`field-${input.name}`}
+                type="text"
+                placeholder="Enter asset code (e.g. USDC, XLM)"
+                value={fieldValue(input.name)}
+                onChange={(e) => handleChange(input.name, input.type, e.target.value)}
+                required={!input.optional}
+                disabled={loading}
+                aria-invalid={Boolean(fieldErrors[input.name])}
+                aria-describedby={fieldErrors[input.name] ? `error-${input.name}` : undefined}
+                style={{ ...inputStyle(input.name), fontFamily: 'monospace' }}
               />
             ) : input.type === 'u32' || input.type === 'u128' || input.type === 'i128' ? (
               <input
+                id={`field-${input.name}`}
                 type="number"
                 placeholder={`Enter ${input.type} value`}
                 value={fieldValue(input.name)}
-                onChange={(e) => handleChange(input.name, e.target.value)}
+                onChange={(e) => handleChange(input.name, input.type, e.target.value)}
                 required={!input.optional}
                 disabled={loading}
-                style={{
-                  padding: '8px 12px',
-                  border: '1px solid #30363d',
-                  borderRadius: '6px',
-                  fontSize: '14px',
-                  boxSizing: 'border-box',
-                  backgroundColor: '#0d1117',
-                  color: '#c9d1d9',
-                }}
+                style={inputStyle(input.name)}
               />
             ) : input.type === 'string' || input.type === 'symbol' ? (
               <input
+                id={`field-${input.name}`}
                 type="text"
                 placeholder={`Enter ${input.type}`}
                 value={fieldValue(input.name)}
-                onChange={(e) => handleChange(input.name, e.target.value)}
+                onChange={(e) => handleChange(input.name, input.type, e.target.value)}
                 required={!input.optional}
                 disabled={loading}
-                style={{
-                  padding: '8px 12px',
-                  border: '1px solid #30363d',
-                  borderRadius: '6px',
-                  fontSize: '14px',
-                  boxSizing: 'border-box',
-                  backgroundColor: '#0d1117',
-                  color: '#c9d1d9',
-                }}
+                style={inputStyle(input.name)}
               />
             ) : input.type === 'bool' ? (
               <select
+                id={`field-${input.name}`}
                 value={formData[input.name] === undefined ? '' : String(formData[input.name])}
-                onChange={(e) => handleChange(input.name, e.target.value === 'true')}
+                onChange={(e) => handleChange(input.name, input.type, e.target.value === 'true')}
                 required={!input.optional}
                 disabled={loading}
-                style={{
-                  padding: '8px 12px',
-                  border: '1px solid #30363d',
-                  borderRadius: '6px',
-                  fontSize: '14px',
-                  boxSizing: 'border-box',
-                  backgroundColor: '#0d1117',
-                  color: '#c9d1d9',
-                }}
+                style={inputStyle(input.name)}
               >
                 <option value="">Select value</option>
                 <option value="true">True</option>
@@ -145,22 +237,30 @@ export function DynamicForm({ func, onSubmit, loading }: DynamicFormProps) {
               </select>
             ) : (
               <input
+                id={`field-${input.name}`}
                 type="text"
                 placeholder="Enter value"
                 value={fieldValue(input.name)}
-                onChange={(e) => handleChange(input.name, e.target.value)}
+                onChange={(e) => handleChange(input.name, input.type, e.target.value)}
                 required={!input.optional}
                 disabled={loading}
-                style={{
-                  padding: '8px 12px',
-                  border: '1px solid #30363d',
-                  borderRadius: '6px',
-                  fontSize: '14px',
-                  boxSizing: 'border-box',
-                  backgroundColor: '#0d1117',
-                  color: '#c9d1d9',
-                }}
+                style={inputStyle(input.name)}
               />
+            )}
+
+            {/* ── Inline validation error ── */}
+            {fieldErrors[input.name] && (
+              <span
+                id={`error-${input.name}`}
+                role="alert"
+                style={{
+                  fontSize: '12px',
+                  color: '#f85149',
+                  marginTop: '2px',
+                }}
+              >
+                {fieldErrors[input.name]}
+              </span>
             )}
           </div>
         ))
@@ -168,16 +268,16 @@ export function DynamicForm({ func, onSubmit, loading }: DynamicFormProps) {
       <div style={{ display: 'flex', gap: '12px', marginTop: '8px' }}>
         <button
           type="submit"
-          disabled={loading}
+          disabled={loading || hasErrors}
           style={{
             padding: '10px 20px',
-            backgroundColor: loading ? '#30363d' : '#00d9ff',
-            color: loading ? '#8b949e' : '#0f1117',
+            backgroundColor: loading || hasErrors ? '#30363d' : '#00d9ff',
+            color: loading || hasErrors ? '#8b949e' : '#0f1117',
             border: 'none',
             borderRadius: '6px',
             fontSize: '14px',
             fontWeight: '600',
-            cursor: loading ? 'not-allowed' : 'pointer',
+            cursor: loading || hasErrors ? 'not-allowed' : 'pointer',
             flex: 1,
             display: 'flex',
             alignItems: 'center',
@@ -196,16 +296,16 @@ export function DynamicForm({ func, onSubmit, loading }: DynamicFormProps) {
         </button>
         <button
           type="button"
-          disabled={loading}
+          disabled={loading || hasErrors}
           style={{
             padding: '10px 20px',
-            backgroundColor: loading ? '#30363d' : '#a371f7',
-            color: loading ? '#8b949e' : '#fff',
+            backgroundColor: loading || hasErrors ? '#30363d' : '#a371f7',
+            color: loading || hasErrors ? '#8b949e' : '#fff',
             border: 'none',
             borderRadius: '6px',
             fontSize: '14px',
             fontWeight: '600',
-            cursor: loading ? 'not-allowed' : 'pointer',
+            cursor: loading || hasErrors ? 'not-allowed' : 'pointer',
             flex: 1,
             display: 'flex',
             alignItems: 'center',
