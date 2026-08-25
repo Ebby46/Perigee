@@ -824,3 +824,35 @@ pub fn remove_authorized_signer(env: Env, admin: Address, signer: Address) -> Re
     Ok(())
 }
 
+use soroban_sdk::{Env, Address, symbol_short};
+
+// ... within impl CrossChainVerifier ...
+
+pub fn add_authorized_signer(env: Env, admin: Address, signer: Address, algorithm: SignerAlgorithm) -> Result<(), ContractError> {
+    admin.require_auth();
+
+    // 1. Verify admin authorization
+    Self::validate_admin(&env, &admin)?;
+
+    // 2. Check if signer is already registered to prevent redundant overwrites
+    let signer_key = DataKey::AuthorizedSigner(signer.clone());
+    if env.storage().persistent().has(&signer_key) {
+        return Err(ContractError::SignerAlreadyExists);
+    }
+
+    // 3. Store signer authorization state and algorithm atomically (single write)
+    env.storage().persistent().set(&signer_key, &algorithm);
+
+    // 4. Safely increment SignerCount exactly once
+    let count_key = DataKey::SignerCount;
+    let mut count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    count += 1;
+    env.storage().persistent().set(&count_key, &count);
+
+    env.events().publish(
+        (symbol_short!("signer"), symbol_short!("added")),
+        (signer, algorithm),
+    );
+
+    Ok(())
+}

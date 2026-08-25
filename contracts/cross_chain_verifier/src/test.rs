@@ -1268,3 +1268,33 @@ mod signer_removal_tests {
         assert_eq!(result, Err(Ok(ContractError::SignerNotFound)));
     }
 }
+
+#[cfg(test)]
+mod signer_count_tests {
+    use super::*;
+    use soroban_sdk::{Env, Address};
+
+    #[test]
+    fn test_get_signer_count_after_single_addition() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, CrossChainVerifier);
+        let client = CrossChainVerifierClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let signer = Address::generate(&env);
+
+        // 1. Initialize contract with admin
+        client.initialize(&admin);
+
+        // Verify initial count is 0
+        assert_eq!(client.get_signer_count(), 0);
+
+        // 2. Add a single authorized signer
+        client.add_authorized_signer(&admin, &signer, &SignerAlgorithm::Ed25519);
+
+        // 3. Verify get_signer_count returns exactly 1 (preventing duplicate increments)
+        assert_eq!(client.get_signer_count(), 1);
+    }
+}
