@@ -5,7 +5,8 @@
   "installCommand": "yarn install",
   "devCommand": "yarn dev",
   "env": {
-    "NEXT_TELEMETRY_DISABLED": "1"
+    "NEXT_TELEMETRY_DISABLED": "1",
+    "API_URL": "http://localhost:8080"
   },
   "rewrites": [
     {
