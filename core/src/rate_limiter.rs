@@ -1,3 +1,15 @@
+//! Rate limiter using token bucket algorithm.
+//!
+//! **Single-instance deployment constraint:** This module uses in-memory state
+//! (`HashMap`) for rate limit counters. It is NOT shared across multiple
+//! backend instances. In a horizontally-scaled deployment, each instance has
+//! its own independent rate limit counters, making rate limiting ineffective
+//! at the fleet level.
+//!
+//! To use across multiple instances, the token bucket state must be backed by
+//! a shared store such as Redis or the database. Until then, this module is
+//! intended for single-instance deployments only.
+
 use std::collections::HashMap;
 use std::time::Instant;
 
