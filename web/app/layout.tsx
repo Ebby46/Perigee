@@ -15,6 +15,8 @@
 
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
+import { NetworkStatusBanner } from '@/components/NetworkStatusBanner';
+import { API_URL } from '@/lib/api';
 
 // TODO: Move these from pages/_app.tsx during migration
 // import { ErrorBoundary } from '@/components/ErrorBoundary';
@@ -41,6 +43,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             </WalletProvider>
           </ErrorBoundary>
         */}
+        <NetworkStatusBanner apiUrl={API_URL} />
         {children}
       </body>
     </html>
