@@ -2,8 +2,9 @@
  * Perigee API client.
  *
  * Uses the browser-native Fetch API so the frontend does not need an extra
- * Axios dependency. Set NEXT_PUBLIC_API_URL in production to point at the Rust
- * simulation engine backend; local development defaults to localhost.
+ * Axios dependency. In development, NEXT_PUBLIC_API_URL points at the Rust
+ * simulation engine backend; in production, requests are proxied through
+ * Next.js API routes (pages/api/[[...path]].ts) to avoid CORS issues.
  */
 
 import type { AnalyzeResponse } from "./sorobantypes";
@@ -29,8 +30,10 @@ export async function validateAnalyzeWasmRequest(
   return validateDto(AnalyzeWasmRequestDto, req);
 }
 
-export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "") ?? DEFAULT_DEV_API_URL;
+const isProduction = process.env.NODE_ENV === "production";
+const configuredUrl = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "") ?? DEFAULT_DEV_API_URL;
+
+export const API_URL = isProduction ? "/api" : configuredUrl;
 
 export const apiConfig = {
   baseUrl: API_URL,
