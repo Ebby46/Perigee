@@ -3,6 +3,7 @@
 import type { InvocationResult } from "../lib/sorobantypes";
 
 import { useTranslations } from "next-intl";
+import { supportLinks, supportMailto } from "../lib/config";
 import { CallGraphVisualizer } from "./CallGraphVisualizer";
 
 interface ResultViewerProps {
@@ -186,6 +187,24 @@ export function ResultViewer({ result }: ResultViewerProps) {
                 correct.
               </>
             )}
+            <br />
+            <a
+              href={supportMailto(
+                `Perigee error report (${result.errorType ?? "UNKNOWN"})`,
+              )}
+              style={{ color: "#00d9ff", textDecoration: "underline" }}
+            >
+              {t("result.contactSupport")}
+            </a>
+            {" · "}
+            <a
+              href={supportLinks.docsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: "#00d9ff", textDecoration: "underline" }}
+            >
+              {t("result.viewDocs")}
+            </a>
           </div>
         </div>
       ) : (

@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useCallback } from "react";
 import { useTranslations } from "next-intl";
+import { supportLinks } from "../lib/config";
 
 /**
  * NetworkStatusBanner
@@ -157,7 +158,17 @@ export function NetworkStatusBanner({ apiUrl }: NetworkStatusBannerProps) {
       {/* Message */}
       <div className="flex-1">
         <span className="font-semibold">{displayTitle}</span>{" "}
-        <span className="opacity-80">{displayBody}</span>
+        <span className="opacity-80">{displayBody}</span>{" "}
+        {!isOffline && (
+          <a
+            href={supportLinks.supportUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2 hover:opacity-100 opacity-90"
+          >
+            {t("network.getHelp")}
+          </a>
+        )}
       </div>
 
       {/* Retry (API-down only) */}

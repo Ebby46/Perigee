@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useCallback } from "react";
 import { useTranslations } from "next-intl";
+import { supportLinks } from "../lib/config";
 
 interface RpcHealth {
   healthy: boolean;
@@ -89,22 +90,42 @@ export function RpcFallbackBanner({ apiUrl }: { apiUrl: string }) {
         </svg>
         <span>
           <strong>{t("rpc.unreachableTitle")}</strong>{" "}
-          {t("rpc.unreachableBody")}
+          {t("rpc.unreachableBody")}{" "}
+          <a
+            href={supportLinks.supportUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2 hover:opacity-100 opacity-90"
+          >
+            {t("rpc.getHelp")}
+          </a>
         </span>
       </div>
 
-      <button
-        type="button"
-        onClick={runCheck}
-        disabled={checking}
-        aria-label="Retry connecting to backend"
-        className="shrink-0 rounded border border-amber-600 px-2.5 py-1 text-xs font-medium
-                   text-amber-200 hover:bg-amber-800 focus:outline-none focus:ring-2
-                   focus:ring-amber-400 focus:ring-offset-2 focus:ring-offset-amber-900
-                   disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-      >
-        {checking ? t("rpc.checking") : t("rpc.retry")}
-      </button>
+      <div className="flex shrink-0 items-center gap-2">
+        <a
+          href={supportLinks.statusUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded border border-amber-600 px-2.5 py-1 text-xs font-medium
+                     text-amber-200 hover:bg-amber-800 focus:outline-none focus:ring-2
+                     focus:ring-amber-400 disabled:opacity-50 transition-colors"
+        >
+          {t("rpc.statusPage")}
+        </a>
+        <button
+          type="button"
+          onClick={runCheck}
+          disabled={checking}
+          aria-label="Retry connecting to backend"
+          className="rounded border border-amber-600 px-2.5 py-1 text-xs font-medium
+                     text-amber-200 hover:bg-amber-800 focus:outline-none focus:ring-2
+                     focus:ring-amber-400 focus:ring-offset-2 focus:ring-offset-amber-900
+                     disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {checking ? t("rpc.checking") : t("rpc.retry")}
+        </button>
+      </div>
     </div>
   );
 }
