@@ -106,13 +106,20 @@ Convert `pages/_app.tsx` providers to `app/layout.tsx`:
 
 **Status**: ⏳ Pending
 
-## Phase 5 — API Routes (N/A)
+## Phase 5 — API Routes
 
-**Status**: ✅ Not applicable — No API routes to migrate
+**Status**: ⚠️ Partial — one catch-all proxy route exists
 
-**Reason**: All backend calls go to external services. No `pages/api/` routes in this project.
+**File**: `pages/api/[[...path]].ts`
 
-This phase would normally handle converting `pages/api/X.ts` to `app/api/X/route.ts`, but since there are no API routes, this phase is skipped.
+**Reason**: A catch-all API route was added to proxy `/api/*` requests to the Rust backend. This avoids CORS issues in production by ensuring the browser makes same-origin requests to the Next.js server, which then forwards them to the backend.
+
+This phase would normally handle converting `pages/api/X.ts` to `app/api/X/route.ts`. When migrating to App Router, replace `pages/api/[[...path]].ts` with `app/api/[[...path]]/route.ts` using the App Router Route Handler pattern.
+
+**Migration notes**:
+- The proxy reads `API_URL` (server-side) to determine the backend target.
+- In production, the client calls `/api/*` instead of the direct backend URL.
+- The route forwards all HTTP methods, query parameters, and JSON bodies.
 
 ## Phase 6 — Final Verification
 
