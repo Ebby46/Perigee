@@ -1,8 +1,13 @@
-export type Network = "testnet" | "mainnet";
-
+export type Network = 'testnet' | 'mainnet';
 export const contractsConfig = {
-  testnet: { contractId: "CAEZJVJ4N7P7GRUVD5NG5LYYH23AQHJUKQEUHW54LR5PGQX3V7FXD_Q" },
-  mainnet: { contractId: "" },
+  testnet: { token: 'testnet-token-address' },
+  mainnet: { token: 'mainnet-token-address' },
 } as const;
 
-export const getContractsConfig = (network: Network) => contractsConfig[network];
+export function getContractsConfig(network) {
+  return contractsConfig[network];
+}
+
+export function validateNetwork(selected, connected) {
+  return selected === connected;
+}
