@@ -117,24 +117,24 @@ test.describe("Wallet connection flow", () => {
     // Inject a mock address directly to verify storage contract without
     // requiring a real wallet extension.
     await page.evaluate(() => {
-      localStorage.setItem("inheritx_wallet_address", "GDUMMY...STELLAR");
-      localStorage.setItem("inheritx_wallet_id", "freighter");
+      localStorage.setItem("perigee_wallet_address", "GDUMMY...STELLAR");
+      localStorage.setItem("perigee_wallet_id", "freighter");
     });
     const address = await page.evaluate(() =>
-      localStorage.getItem("inheritx_wallet_address"),
+      localStorage.getItem("perigee_wallet_address"),
     );
     expect(address).toBe("GDUMMY...STELLAR");
   });
 
   test("disconnect clears wallet address from localStorage", async ({ page }) => {
     await page.evaluate(() => {
-      localStorage.setItem("inheritx_wallet_address", "GDUMMY...STELLAR");
+      localStorage.setItem("perigee_wallet_address", "GDUMMY...STELLAR");
     });
     await page.evaluate(() => {
-      localStorage.removeItem("inheritx_wallet_address");
+      localStorage.removeItem("perigee_wallet_address");
     });
     const address = await page.evaluate(() =>
-      localStorage.getItem("inheritx_wallet_address"),
+      localStorage.getItem("perigee_wallet_address"),
     );
     expect(address).toBeNull();
   });
