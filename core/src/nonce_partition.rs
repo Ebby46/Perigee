@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-const NONCE_WARN_THRESHOLD: u64 = u64::MAX * 80 / 100;
+// Divide before multiplying: `u64::MAX * 80` overflows u64, which is a
+// compile-time error in a const context rather than a runtime surprise.
+const NONCE_WARN_THRESHOLD: u64 = u64::MAX / 100 * 80;
 const NONCE_MAX: u64 = u64::MAX;
 
 pub struct NoncePartition {
@@ -45,9 +47,16 @@ impl NoncePartition {
         self.partitions.get(domain).copied().unwrap_or(0)
     }
 
+    /// Whether `nonce` is still unused for `domain`.
+    ///
+    /// Nonces are handed out sequentially from 0, so everything below the
+    /// current counter has already been issued and only values at or above it
+    /// are still unique. The comparison was inverted, which meant this
+    /// reported every *already-used* nonce as unique and every unused one as
+    /// taken — the wrong answer in both directions for a replay check.
     pub fn verify_unique(&self, domain: &str, nonce: u64) -> bool {
         let current = self.current_nonce(domain);
-        nonce < current
+        nonce >= current
     }
 
     pub fn is_exhausted(&self, domain: &str) -> bool {

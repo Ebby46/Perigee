@@ -36,6 +36,23 @@ pub enum VaultStoreError {
     InvalidData(String),
 }
 
+impl From<crate::policy_expiry::PolicyExpiryError> for AppError {
+    fn from(err: crate::policy_expiry::PolicyExpiryError) -> Self {
+        use crate::policy_expiry::PolicyExpiryError;
+
+        match err {
+            PolicyExpiryError::PolicyExpired { .. } => AppError::PolicyExpired(err.to_string()),
+
+            // A policy nobody can parse cannot authorise anything, but it is a
+            // configuration fault rather than a lapsed authority, so it reads
+            // as a bad request rather than a 403.
+            PolicyExpiryError::MalformedPolicy(_) | PolicyExpiryError::InvalidExpiry(_) => {
+                AppError::BadRequest(err.to_string())
+            }
+        }
+    }
+}
+
 impl From<VaultStoreError> for AppError {
     fn from(err: VaultStoreError) -> Self {
         match err {
@@ -52,48 +69,12 @@ impl From<VaultStoreError> for AppError {
     }
 }
 
-/// Persisted vault record. `version` is the optimistic-lock token.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
-pub struct VaultRecord {
-    pub id: String,
-    pub manager_id: String,
-    pub name: String,
-    pub status: String,
-    pub config_json: String,
-    pub version: i64,
-    pub idempotency_key: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct CreateVaultRequest {
-    pub manager_id: String,
-    pub name: String,
-    #[serde(default = "default_status")]
-    pub status: String,
-    #[serde(default = "default_config")]
-    pub config_json: String,
-    #[serde(default)]
-    pub idempotency_key: Option<String>,
-}
-
-fn default_status() -> String {
-    "active".to_string()
-}
-
-fn default_config() -> String {
-    "{}".to_string()
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct UpdateVaultRequest {
-    /// Required optimistic-lock version from the last GET/create response.
-    pub version: i64,
-    pub name: Option<String>,
-    pub status: Option<String>,
-    pub config_json: Option<String>,
-}
+/// Vault DTOs live in [`crate::db::models`]: the typed DB layer returns them
+/// directly, so re-exporting is what keeps this store's signatures compatible
+/// with what the DB hands back. They were previously duplicated here
+/// field-for-field, which is what made `VaultStore::get` return one type while
+/// the DB produced another.
+pub use crate::db::models::{CreateVaultRequest, UpdateVaultRequest, VaultRecord};
 
 pub struct VaultStore {
     vaults: db::schema::VaultsTable,
@@ -159,7 +140,7 @@ impl VaultStore {
             "#,
         )
         .bind(manager_id)
-        .fetch_all(&self.pool)
+        .fetch_all(self.vaults.pool())
         .await
         .map_err(VaultStoreError::Database)
     }
@@ -193,22 +174,41 @@ impl VaultStore {
         let config_json = req.config_json.as_deref();
         let now = Utc::now();
 
-        self.vaults
+        let result = self
+            .vaults
             .update(id, req.version, name, status, config_json, now)
-            .await
-            .map_err(|e| match e {
-                sqlx::Error::RowNotFound => VaultStoreError::NotFound(id.to_string()),
-                sqlx::Error::Database(db_err) => {
-                    if db_err.message().contains("UNIQUE") {
-                        VaultStoreError::InvalidData(
-                            "A vault with this idempotency key already exists".into(),
-                        )
-                    } else {
-                        VaultStoreError::Database(e)
-                    }
+            .await;
+
+        match result {
+            Ok(record) => Ok(record),
+
+            // The typed update matches on `id AND version`, so "no rows" means
+            // either the vault is gone or the caller held a stale version.
+            // Those are different answers — 404 versus 409 — and the caller
+            // needs to know which, so ask the store which one it was.
+            Err(sqlx::Error::RowNotFound) => {
+                if self.vaults.find_by_id(id).await.ok().flatten().is_some() {
+                    Err(VaultStoreError::Conflict {
+                        vault_id: id.to_string(),
+                        expected_version: req.version,
+                    })
+                } else {
+                    Err(VaultStoreError::NotFound(id.to_string()))
                 }
-                other => VaultStoreError::Database(other),
-            })
+            }
+
+            Err(sqlx::Error::Database(db_err)) => {
+                if db_err.message().contains("UNIQUE") {
+                    Err(VaultStoreError::InvalidData(
+                        "A vault with this idempotency key already exists".into(),
+                    ))
+                } else {
+                    Err(VaultStoreError::Database(sqlx::Error::Database(db_err)))
+                }
+            }
+
+            Err(other) => Err(VaultStoreError::Database(other)),
+        }
     }
 }
 
@@ -334,6 +334,12 @@ pub async fn update_vault_handler(
 ) -> Result<Json<VaultRecord>, AppError> {
     let vault = state.vault_store.get(&id).await?;
     verify_ownership(&state, &user, &vault.manager_id).await?;
+
+    // BE-023: an expired policy authorises nothing. Checked against the
+    // *stored* policy, before the update is applied — otherwise a caller could
+    // use an expired policy to extend its own expiry.
+    crate::policy_expiry::ensure_policy_active(&vault.config_json, chrono::Utc::now())?;
+
     let vault = state.vault_store.update(&id, &payload).await?;
     if payload.config_json.is_some() {
         crate::audit_log::log_audit_event(&vault.manager_id, "fee_split_change", &vault.manager_id);
@@ -374,7 +380,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        VaultStore::new(pool)
+        VaultStore::new(db::schema::TypedSchema::new(std::sync::Arc::new(pool)).vaults())
     }
 
     #[tokio::test]
@@ -575,7 +581,7 @@ mod tests {
         // Only one vault should exist for this manager.
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
             .bind("mgr-1")
-            .fetch_one(&store.pool)
+            .fetch_one(store.vaults.pool())
             .await
             .unwrap();
         assert_eq!(count.0, 1);
@@ -613,7 +619,7 @@ mod tests {
 
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
             .bind("mgr-1")
-            .fetch_one(&store.pool)
+            .fetch_one(store.vaults.pool())
             .await
             .unwrap();
         assert_eq!(count.0, 2);
@@ -649,9 +655,125 @@ mod tests {
 
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
             .bind("mgr-1")
-            .fetch_one(&store.pool)
+            .fetch_one(store.vaults.pool())
             .await
             .unwrap();
         assert_eq!(count.0, 2);
+    }
+
+    // ── BE-023: policy expiry on vault operations ────────────────────────
+
+    /// Build a policy JSON expiring at `expires_at`.
+    fn policy_expiring(expires_at: &str) -> String {
+        format!(r#"{{"policy":{{"expires_at":"{expires_at}"}}}}"#)
+    }
+
+    async fn vault_with_policy(store: &VaultStore, config_json: &str) -> VaultRecord {
+        store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-1".into(),
+                name: "Policy vault".into(),
+                status: "active".into(),
+                config_json: config_json.to_string(),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    /// The acceptance criterion from BE-023: create a vault, let its policy
+    /// expire, attempt an operation, expect rejection.
+    #[tokio::test]
+    async fn an_expired_policy_blocks_a_vault_operation() {
+        let store = test_store().await;
+        let vault = vault_with_policy(&store, &policy_expiring("2020-01-01T00:00:00Z")).await;
+
+        let stored = store.get(&vault.id).await.unwrap();
+
+        let err = crate::policy_expiry::ensure_policy_active(&stored.config_json, Utc::now())
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::policy_expiry::PolicyExpiryError::PolicyExpired { .. }
+        ));
+
+        // And the handler layer turns that into a 403, not a 400 or a 500.
+        let app_err: AppError = err.into();
+        assert!(matches!(app_err, AppError::PolicyExpired(_)));
+    }
+
+    #[tokio::test]
+    async fn an_unexpired_policy_permits_a_vault_operation() {
+        let store = test_store().await;
+        let vault = vault_with_policy(&store, &policy_expiring("2099-01-01T00:00:00Z")).await;
+
+        let stored = store.get(&vault.id).await.unwrap();
+
+        assert!(
+            crate::policy_expiry::ensure_policy_active(&stored.config_json, Utc::now()).is_ok()
+        );
+
+        // The operation itself still goes through.
+        let updated = store
+            .update(
+                &vault.id,
+                &UpdateVaultRequest {
+                    version: stored.version,
+                    name: Some("Renamed".into()),
+                    status: None,
+                    config_json: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.name, "Renamed");
+    }
+
+    /// Existing vaults were created with `config_json = "{}"` and must keep
+    /// working — expiry is opt-in.
+    #[tokio::test]
+    async fn a_vault_without_an_expiry_is_unaffected() {
+        let store = test_store().await;
+        let vault = vault_with_policy(&store, "{}").await;
+
+        let stored = store.get(&vault.id).await.unwrap();
+
+        assert!(
+            crate::policy_expiry::ensure_policy_active(&stored.config_json, Utc::now()).is_ok()
+        );
+    }
+
+    /// The guard reads the *stored* policy, so an expired vault cannot be
+    /// used to extend its own expiry.
+    #[tokio::test]
+    async fn an_expired_policy_cannot_extend_itself() {
+        let store = test_store().await;
+        let vault = vault_with_policy(&store, &policy_expiring("2020-01-01T00:00:00Z")).await;
+
+        let stored = store.get(&vault.id).await.unwrap();
+
+        // What the handler checks, before applying any update.
+        let guard = crate::policy_expiry::ensure_policy_active(&stored.config_json, Utc::now());
+
+        assert!(
+            guard.is_err(),
+            "the stored policy is expired, so the update must be refused \
+             regardless of what the request body would set it to"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_policy_is_refused_as_a_bad_request() {
+        let store = test_store().await;
+        let vault = vault_with_policy(&store, "{not json").await;
+
+        let stored = store.get(&vault.id).await.unwrap();
+        let err = crate::policy_expiry::ensure_policy_active(&stored.config_json, Utc::now())
+            .unwrap_err();
+
+        let app_err: AppError = err.into();
+        assert!(matches!(app_err, AppError::BadRequest(_)));
     }
 }

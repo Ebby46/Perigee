@@ -37,41 +37,12 @@ impl From<ManagerStoreError> for AppError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
-pub struct ManagerRecord {
-    pub id: String,
-    pub stellar_address: String,
-    pub name: String,
-    pub email: String,
-    pub status: String,
-    pub kyc_document_ref: String,
-    pub notes: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct RegisterManagerRequest {
-    pub stellar_address: String,
-    pub name: String,
-    #[serde(default)]
-    pub email: String,
-    #[serde(default)]
-    pub kyc_document_ref: String,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct ApproveManagerRequest {
-    #[serde(default)]
-    pub notes: String,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct ManagerStatusResponse {
-    pub id: String,
-    pub status: String,
-    pub message: String,
-}
+/// Manager DTOs live in [`crate::db::models`]; the typed DB layer returns them
+/// directly. They were duplicated here field-for-field, so every method that
+/// forwarded a row from the DB returned a type the signature did not accept.
+pub use crate::db::models::{
+    ApproveManagerRequest, ManagerRecord, ManagerStatusResponse, RegisterManagerRequest,
+};
 
 pub struct ManagerStore {
     managers: db::schema::ManagersTable,
@@ -109,7 +80,7 @@ impl ManagerStore {
                     if db_err.message().contains("UNIQUE") {
                         ManagerStoreError::DuplicateAddress(stellar.to_string())
                     } else {
-                        ManagerStoreError::Database(e)
+                        ManagerStoreError::Database(sqlx::Error::Database(db_err))
                     }
                 }
                 other => ManagerStoreError::Database(other),
@@ -286,15 +257,20 @@ pub async fn check_manager_status_handler(
         .find_by_stellar_address(&stellar_address)
         .await?;
     match record {
-        Some(m) => Ok(Json(ManagerStatusResponse {
-            id: m.id,
-            status: m.status,
-            message: match m.status.as_str() {
+        Some(m) => {
+            // Derive the message before moving `status` into the response.
+            let message: String = match m.status.as_str() {
                 "approved" => "Manager is approved and active".into(),
                 "rejected" => "Manager registration was rejected".into(),
                 _ => "Manager registration is pending approval".into(),
-            },
-        })),
+            };
+
+            Ok(Json(ManagerStatusResponse {
+                id: m.id,
+                status: m.status,
+                message,
+            }))
+        }
         None => Ok(Json(ManagerStatusResponse {
             id: String::new(),
             status: "unregistered".into(),
@@ -334,7 +310,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        ManagerStore::new(pool)
+        ManagerStore::new(db::schema::TypedSchema::new(std::sync::Arc::new(pool)).managers())
     }
 
     #[tokio::test]

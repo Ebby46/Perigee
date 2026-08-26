@@ -25,6 +25,21 @@ pub fn is_production() -> bool {
         .unwrap_or(false)
 }
 
+/// Serialises every test that mutates process-global environment variables.
+///
+/// `config.rs` and `errors.rs` both toggle `APP_ENV`, so a per-module lock
+/// would still let the two modules race. Tests passed under
+/// `--test-threads=1` and failed intermittently otherwise.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`ENV_LOCK`], ignoring poisoning — a poisoned lock only means some
+/// other env test panicked, and the rest still need to run serially.
+#[cfg(test)]
+pub(crate) fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[derive(Error, Debug)]
 #[allow(dead_code)]
 pub enum AppError {
@@ -55,6 +70,12 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    /// The vault's policy has expired, so it no longer authorises the
+    /// operation (BE-023). 403 rather than 400: the request is well formed
+    /// and the caller is authenticated — the authority behind it has lapsed.
+    #[error("Policy expired: {0}")]
+    PolicyExpired(String),
 }
 
 impl AppError {
@@ -64,8 +85,13 @@ impl AppError {
     /// [`IntoResponse`] which applies the production-redaction policy.
     pub fn diagnostic(&self) -> &str {
         match self {
-            Self::Internal(msg) | Self::NotFound(msg) | Self::BadRequest(msg)
-            | Self::Unauthorized(msg) => msg.as_str(),
+            Self::Internal(msg)
+            | Self::NotFound(msg)
+            | Self::BadRequest(msg)
+            | Self::Unauthorized(msg)
+            | Self::TooManyRequests(msg)
+            | Self::Conflict(msg)
+            | Self::PolicyExpired(msg) => msg.as_str(),
         }
     }
 
@@ -77,6 +103,7 @@ impl AppError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::PolicyExpired(_) => StatusCode::FORBIDDEN,
         }
     }
 
@@ -88,6 +115,7 @@ impl AppError {
             Self::Unauthorized(_) => "UNAUTHORIZED",
             Self::TooManyRequests(_) => "TOO_MANY_REQUESTS",
             Self::Conflict(_) => "CONFLICT",
+            Self::PolicyExpired(_) => "POLICY_EXPIRED",
         }
     }
 
@@ -118,6 +146,16 @@ impl AppError {
                     format!("Unauthorized: {}", msg)
                 }
             }
+
+            // Safe variants — the caller needs the detail to act on them.
+            // A rate-limited client needs to know it was rate limited, and a
+            // conflicted write needs to know which version it lost to.
+            Self::TooManyRequests(msg) => format!("Too many requests: {}", msg),
+            Self::Conflict(msg) => format!("Conflict: {}", msg),
+
+            // The caller needs the expiry timestamp to understand why, and it
+            // is not sensitive — it is their own policy.
+            Self::PolicyExpired(msg) => format!("Policy expired: {}", msg),
         }
     }
 }
@@ -211,8 +249,11 @@ mod tests {
     use super::*;
 
     fn with_env(value: &str, f: impl FnOnce()) {
-        // Crude serial env-var toggle for unit tests (no parallel test concern
-        // because cfg(test) runs are single-threaded by default for this module).
+        // Rust runs tests in parallel by default, so this needs the shared
+        // lock — the previous comment claiming otherwise was the reason these
+        // tests failed intermittently.
+        let _env = crate::errors::env_guard();
+
         unsafe { env::set_var("APP_ENV", value) };
         f();
         unsafe { env::remove_var("APP_ENV") };

@@ -1,10 +1,13 @@
 #![allow(dead_code)]
 
+mod audit_log;
 mod auth;
 mod benchmarks;
 mod billing_service;
 mod cache;
 mod comparison;
+mod config;
+mod db;
 mod errors;
 pub mod fee_analytics;
 pub mod fee_collector;
@@ -14,8 +17,11 @@ mod middleware;
 pub mod insights;
 mod jobs;
 mod merkle_tree;
+mod metrics;
 mod parser;
+mod policy_expiry;
 pub mod reconciliation;
+mod rounding;
 mod routing;
 pub mod rpc_provider;
 mod runner;
@@ -30,18 +36,15 @@ mod ws;
 
 use crate::cache::{ContractCache, SimulationCache};
 use crate::comparison::{CompareMode, RegressionFlag, RegressionReport, ResourceDelta};
-use crate::db;
 use crate::errors::AppError;
-use crate::merkle_tree::MerkleTree;
 use axum::{
-    extract::{Json, Multipart, State},
+    extract::{Json, Multipart, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
-    middleware,
     response::IntoResponse,
     routing::{get, post},
     Extension, Router,
 };
-use config::{Config, ConfigError};
+use ::config::{Config, ConfigError};
 use prometheus::{Encoder, HistogramVec, IntCounterVec, Opts, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 use simulation_service::{AnalysisResult, SimulationMetric, SimulationService};
@@ -357,7 +360,7 @@ fn load_config() -> Result<AppConfig, ConfigError> {
     dotenvy::dotenv().ok();
 
     let settings = Config::builder()
-        .add_source(config::Environment::default())
+        .add_source(::config::Environment::default())
         .set_default("server_port", 8080)?
         .set_default("rust_log", "info")?
         .set_default("soroban_rpc_url", "https://soroban-testnet.stellar.org")?
@@ -1773,7 +1776,7 @@ async fn ready_check(State(state): State<Arc<AppState>>) -> axum::response::Resp
     use axum::response::IntoResponse;
     
     let db_ok = sqlx::query("SELECT 1")
-        .execute(&state.reconciler_pool)
+        .execute(state.reconciliation_repo.pool())
         .await
         .is_ok();
         
@@ -2386,7 +2389,7 @@ async fn main() {
             "/vaults/:id",
             get(vault_store::get_vault_handler).patch(vault_store::update_vault_handler),
         )
-        .route_layer(middleware::from_fn(auth::auth_middleware));
+        .route_layer(axum::middleware::from_fn(auth::auth_middleware));
 
     let app = Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
@@ -2448,7 +2451,9 @@ async fn main() {
         .fallback(not_found_handler)
         .layer(Extension(auth_state))
         .layer(cors)
-        .layer(crate::middleware::correlation_id_middleware)
+        .layer(axum::middleware::from_fn(
+            crate::middleware::correlation_id_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 2)) // 2 MB limit
         .with_state(app_state); // ← thread AppState through all handlers
@@ -2510,7 +2515,7 @@ mod cors_tests {
         // For a lightweight structural check we inspect the Debug output, which
         // differs between `Any` and `List(...)`.
         let dbg = format!("{:?}", layer);
-        if dbg.contains("Any") {
+        if is_any_origin(&dbg) {
             // Any-mode layer: every origin is "allowed" from its perspective.
             true
         } else {
@@ -2519,13 +2524,23 @@ mod cors_tests {
         }
     }
 
+    /// Whether a `CorsLayer`'s debug rendering describes an allow-any policy.
+    ///
+    /// tower-http renders this as `allow_origin: Const("*")`, and older
+    /// versions rendered it as `Any`. These tests inspect the Debug output
+    /// because `AllowOrigin` exposes no predicate, so accept both spellings
+    /// rather than pinning to one release's formatting.
+    fn is_any_origin(dbg: &str) -> bool {
+        dbg.contains("Any") || dbg.contains(r#"allow_origin: Const("*")"#)
+    }
+
     #[test]
     fn empty_string_produces_any_origin() {
         let layer = build_cors_layer("");
         let dbg = format!("{:?}", layer);
         assert!(
-            dbg.contains("Any"),
-            "Expected Any in debug output, got: {dbg}"
+            is_any_origin(&dbg),
+            "Expected an allow-any origin policy, got: {dbg}"
         );
     }
 
@@ -2534,8 +2549,8 @@ mod cors_tests {
         let layer = build_cors_layer("   ");
         let dbg = format!("{:?}", layer);
         assert!(
-            dbg.contains("Any"),
-            "Expected Any for whitespace input, got: {dbg}"
+            is_any_origin(&dbg),
+            "Expected an allow-any origin policy for whitespace input, got: {dbg}"
         );
     }
 
@@ -2769,7 +2784,7 @@ mod tests {
         ));
         let protected = Router::new()
             .route("/analyze/wasm/profile", post(analyze_wasm_profile))
-            .route_layer(middleware::from_fn(auth::auth_middleware));
+            .route_layer(axum::middleware::from_fn(auth::auth_middleware));
         Router::new()
             .merge(protected)
             .layer(Extension(auth_state))
