@@ -298,6 +298,10 @@ impl ProviderRegistry {
             instance_id: config.instance_id,
             public_base_url: config.public_base_url.map(|url| normalize_base_url(&url)),
             latency_cursor: AtomicUsize::new(0),
+            // Documented as absent on CLI/test paths; the HTTP server attaches
+            // its own handle. The field was added to the struct without being
+            // threaded through this constructor.
+            metrics: None,
         })
     }
 

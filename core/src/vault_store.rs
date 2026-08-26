@@ -52,48 +52,12 @@ impl From<VaultStoreError> for AppError {
     }
 }
 
-/// Persisted vault record. `version` is the optimistic-lock token.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
-pub struct VaultRecord {
-    pub id: String,
-    pub manager_id: String,
-    pub name: String,
-    pub status: String,
-    pub config_json: String,
-    pub version: i64,
-    pub idempotency_key: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct CreateVaultRequest {
-    pub manager_id: String,
-    pub name: String,
-    #[serde(default = "default_status")]
-    pub status: String,
-    #[serde(default = "default_config")]
-    pub config_json: String,
-    #[serde(default)]
-    pub idempotency_key: Option<String>,
-}
-
-fn default_status() -> String {
-    "active".to_string()
-}
-
-fn default_config() -> String {
-    "{}".to_string()
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct UpdateVaultRequest {
-    /// Required optimistic-lock version from the last GET/create response.
-    pub version: i64,
-    pub name: Option<String>,
-    pub status: Option<String>,
-    pub config_json: Option<String>,
-}
+/// Vault DTOs live in [`crate::db::models`]: the typed DB layer returns them
+/// directly, so re-exporting is what keeps this store's signatures compatible
+/// with what the DB hands back. They were previously duplicated here
+/// field-for-field, which is what made `VaultStore::get` return one type while
+/// the DB produced another.
+pub use crate::db::models::{CreateVaultRequest, UpdateVaultRequest, VaultRecord};
 
 pub struct VaultStore {
     vaults: db::schema::VaultsTable,
@@ -159,7 +123,7 @@ impl VaultStore {
             "#,
         )
         .bind(manager_id)
-        .fetch_all(&self.pool)
+        .fetch_all(self.vaults.pool())
         .await
         .map_err(VaultStoreError::Database)
     }
@@ -193,22 +157,41 @@ impl VaultStore {
         let config_json = req.config_json.as_deref();
         let now = Utc::now();
 
-        self.vaults
+        let result = self
+            .vaults
             .update(id, req.version, name, status, config_json, now)
-            .await
-            .map_err(|e| match e {
-                sqlx::Error::RowNotFound => VaultStoreError::NotFound(id.to_string()),
-                sqlx::Error::Database(db_err) => {
-                    if db_err.message().contains("UNIQUE") {
-                        VaultStoreError::InvalidData(
-                            "A vault with this idempotency key already exists".into(),
-                        )
-                    } else {
-                        VaultStoreError::Database(e)
-                    }
+            .await;
+
+        match result {
+            Ok(record) => Ok(record),
+
+            // The typed update matches on `id AND version`, so "no rows" means
+            // either the vault is gone or the caller held a stale version.
+            // Those are different answers — 404 versus 409 — and the caller
+            // needs to know which, so ask the store which one it was.
+            Err(sqlx::Error::RowNotFound) => {
+                if self.vaults.find_by_id(id).await.ok().flatten().is_some() {
+                    Err(VaultStoreError::Conflict {
+                        vault_id: id.to_string(),
+                        expected_version: req.version,
+                    })
+                } else {
+                    Err(VaultStoreError::NotFound(id.to_string()))
                 }
-                other => VaultStoreError::Database(other),
-            })
+            }
+
+            Err(sqlx::Error::Database(db_err)) => {
+                if db_err.message().contains("UNIQUE") {
+                    Err(VaultStoreError::InvalidData(
+                        "A vault with this idempotency key already exists".into(),
+                    ))
+                } else {
+                    Err(VaultStoreError::Database(sqlx::Error::Database(db_err)))
+                }
+            }
+
+            Err(other) => Err(VaultStoreError::Database(other)),
+        }
     }
 }
 
@@ -374,7 +357,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        VaultStore::new(pool)
+        VaultStore::new(db::schema::TypedSchema::new(std::sync::Arc::new(pool)).vaults())
     }
 
     #[tokio::test]
@@ -575,7 +558,7 @@ mod tests {
         // Only one vault should exist for this manager.
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
             .bind("mgr-1")
-            .fetch_one(&store.pool)
+            .fetch_one(store.vaults.pool())
             .await
             .unwrap();
         assert_eq!(count.0, 1);
@@ -613,7 +596,7 @@ mod tests {
 
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
             .bind("mgr-1")
-            .fetch_one(&store.pool)
+            .fetch_one(store.vaults.pool())
             .await
             .unwrap();
         assert_eq!(count.0, 2);
@@ -649,7 +632,7 @@ mod tests {
 
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
             .bind("mgr-1")
-            .fetch_one(&store.pool)
+            .fetch_one(store.vaults.pool())
             .await
             .unwrap();
         assert_eq!(count.0, 2);

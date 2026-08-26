@@ -208,7 +208,7 @@ impl VaultsTable {
         config_json: Option<&str>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<crate::db::models::VaultRecord, sqlx::Error> {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE vaults SET name = COALESCE(?1, name), status = COALESCE(?2, status), config_json = COALESCE(?3, config_json), version = version + 1, updated_at = ?4 WHERE id = ?5 AND version = ?6",
         )
         .bind(name)
@@ -220,10 +220,19 @@ impl VaultsTable {
         .execute(&*self.pool)
         .await?;
 
+        // The `AND version = ?6` clause is what enforces optimistic locking,
+        // but only if the outcome is read. Discarding `rows_affected` meant a
+        // stale writer matched no rows, fell through to the read below, and
+        // received the current record as though its write had landed.
+        if result.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+
         self.find_by_id(id).await?.ok_or(sqlx::Error::RowNotFound)
     }
 }
 
+#[derive(Clone)]
 pub struct ReconciliationReportsTable {
     pool: Arc<DbPool>,
 }
@@ -320,6 +329,7 @@ impl ReconciliationReportsTable {
     }
 }
 
+#[derive(Clone)]
 pub struct ReconciliationDiscrepanciesTable {
     pool: Arc<DbPool>,
 }
