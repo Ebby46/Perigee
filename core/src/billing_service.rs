@@ -147,7 +147,20 @@ impl FeeService {
                 safety_margin
             )));
         }
-        let bps = (safety_margin * 10_000.0).round() as i64;
+        // BE-025: this used `f64::round`, a third rounding strategy alongside
+        // the banker's rounding in `rounding` and the integer floor in
+        // `fee_analytics`. It now goes through the shared conversion, which
+        // floors like every other rate path in the protocol.
+        let bps = match crate::rounding::decimal_to_bps(safety_margin) {
+            Some(bps) => bps as i64,
+            None => {
+                return Err(AppError::BadRequest(format!(
+                    "safety_margin {} is out of representable range",
+                    safety_margin
+                )))
+            }
+        };
+
         match u32::try_from(bps) {
             Ok(v) => Self::validate_safety_margin_bps(v),
             Err(_) => Err(AppError::BadRequest(format!(

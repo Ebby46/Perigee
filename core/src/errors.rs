@@ -70,6 +70,12 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    /// The vault's policy has expired, so it no longer authorises the
+    /// operation (BE-023). 403 rather than 400: the request is well formed
+    /// and the caller is authenticated — the authority behind it has lapsed.
+    #[error("Policy expired: {0}")]
+    PolicyExpired(String),
 }
 
 impl AppError {
@@ -84,7 +90,8 @@ impl AppError {
             | Self::BadRequest(msg)
             | Self::Unauthorized(msg)
             | Self::TooManyRequests(msg)
-            | Self::Conflict(msg) => msg.as_str(),
+            | Self::Conflict(msg)
+            | Self::PolicyExpired(msg) => msg.as_str(),
         }
     }
 
@@ -96,6 +103,7 @@ impl AppError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::PolicyExpired(_) => StatusCode::FORBIDDEN,
         }
     }
 
@@ -107,6 +115,7 @@ impl AppError {
             Self::Unauthorized(_) => "UNAUTHORIZED",
             Self::TooManyRequests(_) => "TOO_MANY_REQUESTS",
             Self::Conflict(_) => "CONFLICT",
+            Self::PolicyExpired(_) => "POLICY_EXPIRED",
         }
     }
 
@@ -143,6 +152,10 @@ impl AppError {
             // conflicted write needs to know which version it lost to.
             Self::TooManyRequests(msg) => format!("Too many requests: {}", msg),
             Self::Conflict(msg) => format!("Conflict: {}", msg),
+
+            // The caller needs the expiry timestamp to understand why, and it
+            // is not sensitive — it is their own policy.
+            Self::PolicyExpired(msg) => format!("Policy expired: {}", msg),
         }
     }
 }

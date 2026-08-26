@@ -448,13 +448,16 @@ pub(crate) fn ceil_mul_bps(x: u64, bps: u64) -> u64 {
 /// for plain percentage rounding. Returns `0` when `denominator == 0`.
 #[inline]
 pub(crate) fn ratio_to_bps(numerator: u64, denominator: u64, scale: u64) -> u32 {
-    if denominator == 0 {
-        return 0;
+    // BE-025: delegate to the protocol's single rounding strategy rather than
+    // repeating the arithmetic. `scale` multiplies the numerator, matching the
+    // previous behaviour, and the shared helper floors and saturates at 100%.
+    let scaled_numerator = (numerator as u128) * (scale as u128);
+
+    if scaled_numerator > u64::MAX as u128 {
+        return crate::rounding::BPS_DENOMINATOR as u32;
     }
-    let n = numerator as u128;
-    let d = denominator as u128;
-    let s = scale as u128;
-    ((n * 10_000 * s) / d).min(10_000) as u32
+
+    crate::rounding::ratio_to_bps(scaled_numerator as u64, denominator) as u32
 }
 
 /// Integer square root (Newton's method, floored).
