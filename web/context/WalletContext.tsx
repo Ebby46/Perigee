@@ -1,12 +1,15 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState } from "react";
+import React, { useEffect } from "react";
+import type { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit";
+import { createStore, createUseStore, shallow } from "../lib/createStore";
+import { clearLatestAnalysis } from "../lib/analysisStorage";
+import { logger } from "../lib/logger";
 
-interface WalletContextType {
+interface WalletState {
   connect: (moduleId: string) => Promise<void>;
   disconnect: () => Promise<void>;
   address: string | null;
-  isConnected: boolean;
   isConnecting: boolean;
   selectedWalletId: string | null;
   openModal: () => void;
@@ -14,131 +17,190 @@ interface WalletContextType {
   isModalOpen: boolean;
   supportedWallets: { id: string; name: string; icon: string }[];
   error: string | null;
+  kit: StellarWalletsKit | null;
 }
 
-const WalletContext = createContext<WalletContextType | undefined>(undefined);
+const supportedWallets = [
+  { id: "freighter", name: "Freighter", icon: "https://stellar.creit.tech/wallet-icons/freighter.png" },
+  { id: "albedo", name: "Albedo", icon: "https://stellar.creit.tech/wallet-icons/albedo.png" },
+  { id: "xbull", name: "xBull", icon: "https://stellar.creit.tech/wallet-icons/xbull.png" },
+  { id: "rabet", name: "Rabet", icon: "https://stellar.creit.tech/wallet-icons/rabet.png" },
+  { id: "lobstr", name: "Lobstr", icon: "https://stellar.creit.tech/wallet-icons/lobstr.png" },
+];
 
-export const useWallet = () => {
-  const context = useContext(WalletContext);
-  if (!context) {
-    throw new Error("useWallet must be used within a WalletProvider");
-  }
-  return context;
-};
+const walletStore = createStore<WalletState>((set, get) => ({
+  address: null,
+  isConnecting: false,
+  selectedWalletId: null,
+  isModalOpen: false,
+  error: null,
+  kit: null,
+  supportedWallets,
 
-export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
-  const [address, setAddress] = useState<string | null>(null);
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [selectedWalletId, setSelectedWalletId] = useState<string | null>(null);
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [kit, setKit] = useState<any>(null);
-
-  useEffect(() => {
-    const initKit = async () => {
-      try {
-        const walletKitModule = await import("@creit.tech/stellar-wallets-kit");
-
-        const kitInstance = new walletKitModule.StellarWalletsKit({
-          network: walletKitModule.WalletNetwork.TESTNET,
-          selectedWalletId: walletKitModule.FREIGHTER_ID,
-          modules: walletKitModule.allowAllModules(),
-        });
-
-        setKit(kitInstance);
-
-        const savedAddress = localStorage.getItem("inheritx_wallet_address");
-        const savedWalletId = localStorage.getItem("inheritx_wallet_id");
-        if (savedAddress && savedWalletId) {
-          setAddress(savedAddress);
-          setSelectedWalletId(savedWalletId);
-        }
-      } catch (err) {
-        console.error("Failed to initialize wallet kit:", err);
-        setError("Failed to load wallet kit");
-      }
-    };
-
-    initKit();
-  }, []);
-
-  const supportedWallets = [
-    { id: "freighter", name: "Freighter", icon: "https://stellar.creit.tech/wallet-icons/freighter.png" },
-    { id: "albedo", name: "Albedo", icon: "https://stellar.creit.tech/wallet-icons/albedo.png" },
-    { id: "xbull", name: "xBull", icon: "https://stellar.creit.tech/wallet-icons/xbull.png" },
-    { id: "rabet", name: "Rabet", icon: "https://stellar.creit.tech/wallet-icons/rabet.png" },
-    { id: "lobstr", name: "Lobstr", icon: "https://stellar.creit.tech/wallet-icons/lobstr.png" },
-  ];
-
-  const connectWallet = async (moduleId: string) => {
+  connect: async (moduleId: string) => {
+    const { kit } = get();
     if (!kit) {
-      setError("Wallet kit not loaded yet");
+      set({ error: "Wallet kit not loaded yet" });
       return;
     }
 
-    setIsConnecting(true);
-    setError(null);
+    set({ isConnecting: true, error: null });
 
     try {
       kit.setWallet(moduleId);
       const { address: walletAddress } = await kit.getAddress();
 
-      setAddress(walletAddress);
-      setSelectedWalletId(moduleId);
-      localStorage.setItem("inheritx_wallet_address", walletAddress);
-      localStorage.setItem("inheritx_wallet_id", moduleId);
-      setIsModalOpen(false);
-    } catch (err: any) {
-      const errorMessage = err?.message || "Connection failed";
-      setError(errorMessage);
-      console.error("Wallet connection failed:", err);
+      set({
+        address: walletAddress,
+        selectedWalletId: moduleId,
+        isModalOpen: false,
+      });
+      localStorage.setItem("perigee_wallet_address", walletAddress);
+      localStorage.setItem("perigee_wallet_id", moduleId);
+      sessionStorage.setItem("perigee_wallet_id", moduleId);
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : "Connection failed";
+      set({ error: errorMessage });
+      logger.error("Wallet connection failed:", err);
     } finally {
-      setIsConnecting(false);
+      set({ isConnecting: false });
     }
-  };
+  },
 
-  const disconnect = async () => {
+  disconnect: async () => {
+    const { kit } = get();
     if (kit) {
       try {
         await kit.disconnect();
-      } catch (err) {
-        console.error("Disconnect error:", err);
+} catch (err) {
+      logger.error("Disconnect error:", err);
+    }
+    }
+    set({ address: null, selectedWalletId: null, error: null });
+    localStorage.removeItem("perigee_wallet_address");
+    localStorage.removeItem("perigee_wallet_id");
+    sessionStorage.removeItem("perigee_wallet_id");
+    clearLatestAnalysis();
+  },
+
+  openModal: () => set({ error: null, isModalOpen: true }),
+  closeModal: () => set({ error: null, isModalOpen: false }),
+}));
+
+let didInit = false;
+
+async function initWalletKit() {
+  if (didInit) return;
+  didInit = true;
+
+  try {
+    const walletKitModule = await import("@creit.tech/stellar-wallets-kit");
+
+    // Migrate legacy inheritx_* keys to perigee_* prefix (Closes #208)
+    if (!localStorage.getItem("perigee_wallet_address")) {
+      const legacyAddress = localStorage.getItem("inheritx_wallet_address");
+      if (legacyAddress) {
+        localStorage.setItem("perigee_wallet_address", legacyAddress);
+        localStorage.removeItem("inheritx_wallet_address");
       }
     }
-    setAddress(null);
-    setSelectedWalletId(null);
-    setError(null);
-    localStorage.removeItem("inheritx_wallet_address");
-    localStorage.removeItem("inheritx_wallet_id");
-  };
+    if (!localStorage.getItem("perigee_wallet_id")) {
+      const legacyWalletId = localStorage.getItem("inheritx_wallet_id");
+      if (legacyWalletId) {
+        localStorage.setItem("perigee_wallet_id", legacyWalletId);
+        localStorage.removeItem("inheritx_wallet_id");
+      }
+    }
 
-  const openModal = () => {
-    setError(null);
-    setIsModalOpen(true);
-  };
+    const savedAddress = localStorage.getItem("perigee_wallet_address");
+    const savedWalletId = localStorage.getItem("perigee_wallet_id");
 
-  const closeModal = () => {
-    setError(null);
-    setIsModalOpen(false);
-  };
+    const kitInstance = new walletKitModule.StellarWalletsKit({
+      network: walletKitModule.WalletNetwork.TESTNET,
+      selectedWalletId: savedWalletId || walletKitModule.FREIGHTER_ID,
+      modules: walletKitModule.allowAllModules(),
+    });
 
-  return (
-    <WalletContext.Provider
-      value={{
-        connect: connectWallet,
-        disconnect,
-        address,
-        isConnected: !!address,
-        isConnecting,
-        selectedWalletId,
-        openModal,
-        closeModal,
-        isModalOpen,
-        supportedWallets,
-        error,
-      }}
-    >
-      {children}
-    </WalletContext.Provider>
-  );
+    walletStore.setState({ kit: kitInstance });
+
+    if (savedAddress && savedWalletId) {
+      try {
+        kitInstance.setWallet(savedWalletId);
+        const { address: walletAddress } = await kitInstance.getAddress();
+        walletStore.setState({ address: walletAddress, selectedWalletId: savedWalletId });
+        sessionStorage.setItem("perigee_wallet_id", savedWalletId);
+      } catch (err) {
+        logger.error("Auto-reconnect failed:", err);
+        localStorage.removeItem("perigee_wallet_address");
+        localStorage.removeItem("perigee_wallet_id");
+        sessionStorage.removeItem("perigee_wallet_id");
+      }
+    }
+} catch (err) {
+      logger.error("Failed to initialize wallet kit:", err);
+      walletStore.setState({ error: "Failed to load wallet kit" });
+    }
+  }
+
+const useWalletStoreImpl = createUseStore(walletStore);
+
+/** Select a slice of wallet state. Pass `shallow` as the equality fn when selecting an object/array. */
+export function useWalletStore<U>(
+  selector: (state: WalletState) => U,
+  equalityFn?: (a: U, b: U) => boolean,
+): U {
+  return useWalletStoreImpl(selector, equalityFn);
+}
+
+const selectAll = (state: WalletState) => ({
+  connect: state.connect,
+  disconnect: state.disconnect,
+  address: state.address,
+  isConnected: !!state.address,
+  isConnecting: state.isConnecting,
+  selectedWalletId: state.selectedWalletId,
+  openModal: state.openModal,
+  closeModal: state.closeModal,
+  isModalOpen: state.isModalOpen,
+  supportedWallets: state.supportedWallets,
+  error: state.error,
+});
+
+/**
+ * Back-compat convenience hook returning the full wallet slice.
+ *
+ * ⚠️  Re-render warning: because this selector returns a new object on every
+ * call, the component will re-render whenever *any* field in the wallet store
+ * changes — even fields the component doesn't use.
+ *
+ * **Prefer `useWalletStore(selector)` for granular subscriptions.** For
+ * example, a component that only reads `address` should do:
+ *
+ * ```tsx
+ * const address = useWalletStore((s) => s.address);
+ * ```
+ *
+ * When you genuinely need multiple fields at once, pass `shallow` as the
+ * equality function so the component only re-renders when the selected values
+ * actually change:
+ *
+ * ```tsx
+ * const { address, isConnecting } = useWalletStore(
+ *   (s) => ({ address: s.address, isConnecting: s.isConnecting }),
+ *   shallow,
+ * );
+ * ```
+ *
+ * `useWallet()` itself uses `shallow` internally, but it still subscribes to
+ * the entire store slice — use it only in top-level connectors or when you
+ * truly need the full wallet object.
+ */
+export const useWallet = () => useWalletStoreImpl(selectAll, shallow);
+
+export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
+  useEffect(() => {
+    initWalletKit();
+  }, []);
+
+  return <>{children}</>;
 };
