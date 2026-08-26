@@ -1,21 +1,21 @@
 "use client";
 import Image from "next/image";
 
-import { useWallet } from "../context/WalletContext";
-import { motion, AnimatePresence } from "framer-motion";
+import { useWalletStore } from "../context/WalletContext";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { Wallet, Check, AlertCircle } from "lucide-react";
 import React from "react";
 import UserIcon from "./userIcon";
+import { logger } from "../lib/logger";
 
 export function WalletModal() {
-  const {
-    isModalOpen,
-    closeModal,
-    supportedWallets,
-    connect,
-    isConnecting,
-    error,
-  } = useWallet();
+  const isModalOpen = useWalletStore((s) => s.isModalOpen);
+  const closeModal = useWalletStore((s) => s.closeModal);
+  const supportedWallets = useWalletStore((s) => s.supportedWallets);
+  const connect = useWalletStore((s) => s.connect);
+  const isConnecting = useWalletStore((s) => s.isConnecting);
+  const error = useWalletStore((s) => s.error);
+  const shouldReduceMotion = useReducedMotion();
 
   const [activeSelection, setActiveSelection] = React.useState<string | null>(
     null,
@@ -32,7 +32,7 @@ export function WalletModal() {
         await connect(activeSelection);
       } catch (err) {
         // Error is handled in context
-        console.error("Connection error:", err);
+        logger.error("Connection error:", err);
       }
     }
   };
@@ -47,12 +47,14 @@ export function WalletModal() {
             onClick={closeModal}
           />
           <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.95 }}
-            transition={{ duration: 0.2, ease: "easeOut" }}
-            className="fixed top-40 left-[40%] z-50 w-96 rounded-2xl bg-[#161E22] border border-[#2A3338] p-8 shadow-2xl"
+            initial={shouldReduceMotion ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.95 }}
+            animate={shouldReduceMotion ? { opacity: 1, scale: 1 } : { opacity: 1, scale: 1 }}
+            exit={shouldReduceMotion ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.95 }}
+            transition={{ duration: shouldReduceMotion ? 0 : 0.2, ease: "easeOut" }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
           >
+            {/* Modal card — centred, responsive width */}
+            <div className="w-96 max-w-[calc(100vw-2rem)] rounded-2xl bg-[#161E22] border border-[#2A3338] p-8 shadow-2xl">
             <div className="flex flex-col items-center">
               <div className="text-center mb-6">
                 <h2 className="text-2xl font-medium text-white">
@@ -131,6 +133,7 @@ export function WalletModal() {
                 <UserIcon />
                 <span>{isConnecting ? "Connecting..." : "Connect Wallet"}</span>
               </button>
+            </div>
             </div>
           </motion.div>
         </>
