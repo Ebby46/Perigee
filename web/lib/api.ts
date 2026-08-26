@@ -2,16 +2,38 @@
  * Perigee API client.
  *
  * Uses the browser-native Fetch API so the frontend does not need an extra
- * Axios dependency. Set NEXT_PUBLIC_API_URL in production to point at the Rust
- * simulation engine backend; local development defaults to localhost.
+ * Axios dependency. In development, NEXT_PUBLIC_API_URL points at the Rust
+ * simulation engine backend; in production, requests are proxied through
+ * Next.js API routes (pages/api/[[...path]].ts) to avoid CORS issues.
  */
 
 import type { AnalyzeResponse } from "./sorobantypes";
 
+import {
+  AnalyzeRequestDto,
+  AnalyzeWasmRequestDto,
+  ValidationError as DtoValidationError,
+  validateDto,
+} from "./dtos";
+
 const DEFAULT_DEV_API_URL = "http://localhost:8080";
 
-export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "") ?? DEFAULT_DEV_API_URL;
+export class ValidationError extends DtoValidationError {}
+
+export async function validateAnalyzeRequest(req: AnalyzeRequest): Promise<AnalyzeRequest> {
+  return validateDto(AnalyzeRequestDto, req);
+}
+
+export async function validateAnalyzeWasmRequest(
+  req: AnalyzeWasmRequest,
+): Promise<AnalyzeWasmRequest> {
+  return validateDto(AnalyzeWasmRequestDto, req);
+}
+
+const isProduction = process.env.NODE_ENV === "production";
+const configuredUrl = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "") ?? DEFAULT_DEV_API_URL;
+
+export const API_URL = isProduction ? "/api" : configuredUrl;
 
 export const apiConfig = {
   baseUrl: API_URL,
@@ -98,6 +120,56 @@ async function parseResponse(response: Response): Promise<unknown> {
     : response.text();
 }
 
+// --- Retry/backoff for transient RPC failures (Stellar testnet timeouts, 5xx, 429) ---
+
+const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
+const MAX_RETRY_ATTEMPTS = 4;
+const BASE_RETRY_DELAY_MS = 500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatus(status: number): boolean {
+  return RETRYABLE_STATUS_CODES.has(status);
+}
+
+function isRetryableNetworkError(error: unknown): boolean {
+  // fetch() throws TypeError on network-level failures (timeout, DNS, connection reset, etc.)
+  return error instanceof TypeError;
+}
+
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < MAX_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+
+      const isRetryableApiError =
+        error instanceof ApiError && isRetryableStatus(error.status);
+      const isRetryableNetwork = isRetryableNetworkError(error);
+      const isLastAttempt = attempt === MAX_RETRY_ATTEMPTS - 1;
+
+      if ((!isRetryableApiError && !isRetryableNetwork) || isLastAttempt) {
+        throw error;
+      }
+
+      const delayMs = BASE_RETRY_DELAY_MS * 2 ** attempt;
+      // Add full-jitter (0–100 % of the backoff window) to spread thundering-herd
+      // retries across time and avoid synchronized retry storms on shared RPC nodes.
+      const jitter = Math.random() * delayMs;
+      await sleep(delayMs + jitter);
+    }
+  }
+
+  throw lastError;
+}
+
+// --- end retry/backoff ---
+
 async function request<T>(
   endpoint: string,
   options: ApiRequestOptions = {},
@@ -117,19 +189,21 @@ async function request<T>(
     requestHeaders.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(apiUrl(endpoint, params), {
-    ...requestInit,
-    headers: requestHeaders,
-    body: buildBody(body),
+  return withRetry(async () => {
+    const response = await fetch(apiUrl(endpoint, params), {
+      ...requestInit,
+      headers: requestHeaders,
+      body: buildBody(body),
+    });
+
+    const responseBody = await parseResponse(response);
+
+    if (!response.ok) {
+      throw new ApiError(response.status, response.statusText, responseBody);
+    }
+
+    return responseBody as T;
   });
-
-  const responseBody = await parseResponse(response);
-
-  if (!response.ok) {
-    throw new ApiError(response.status, response.statusText, responseBody);
-  }
-
-  return responseBody as T;
 }
 
 export const apiClient = {
@@ -185,15 +259,119 @@ export interface AnalyzeWasmRequest {
   enable_experimental?: boolean;
 }
 
-export const analyzeService = {
-  analyze(req: AnalyzeRequest, token?: string): Promise<AnalyzeResponse> {
-    return apiClient.post<AnalyzeResponse>("/analyze", req, { token });
+// ── Manager onboarding types (API-33) ──────────────────────────────────────
+
+export interface RegisterManagerRequest {
+  stellar_address: string;
+  name: string;
+  email?: string;
+  kyc_document_ref?: string;
+}
+
+export interface ManagerRecord {
+  id: string;
+  stellar_address: string;
+  name: string;
+  email: string;
+  status: string;
+  kyc_document_ref: string;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ManagerStatusResponse {
+  id: string;
+  status: string;
+  message: string;
+}
+
+export const managerService = {
+  async register(req: RegisterManagerRequest): Promise<ManagerRecord> {
+    return apiClient.post<ManagerRecord>("/managers/register", req);
   },
 
-  analyzeWasm(
+  async list(status?: string): Promise<ManagerRecord[]> {
+    const params = status ? { status } : undefined;
+    return apiClient.get<ManagerRecord[]>("/managers", { params });
+  },
+
+  async get(id: string): Promise<ManagerRecord> {
+    return apiClient.get<ManagerRecord>(`/managers/${id}`);
+  },
+
+  async approve(id: string, notes = ""): Promise<ManagerRecord> {
+    return apiClient.post<ManagerRecord>(`/managers/${id}/approve`, { notes });
+  },
+
+  async reject(id: string, notes = ""): Promise<ManagerRecord> {
+    return apiClient.post<ManagerRecord>(`/managers/${id}/reject`, { notes });
+  },
+
+  async checkStatus(stellarAddress: string): Promise<ManagerStatusResponse> {
+    return apiClient.get<ManagerStatusResponse>(`/managers/status/${stellarAddress}`);
+  },
+};
+
+export interface VaultRecord {
+  id: string;
+  manager_id: string;
+  name: string;
+  status: string;
+  config_json: string;
+  version: number;
+  idempotency_key: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateVaultRequest {
+  manager_id: string;
+  name: string;
+  status?: string;
+  config_json?: string;
+  idempotency_key?: string;
+}
+
+export interface UpdateVaultRequest {
+  version: number;
+  name?: string;
+  status?: string;
+  config_json?: string;
+}
+
+export const vaultService = {
+  async list(managerId: string, token?: string): Promise<VaultRecord[]> {
+    return apiClient.get<VaultRecord[]>("/vaults", {
+      params: { manager_id: managerId },
+      token,
+    });
+  },
+
+  async get(id: string, token?: string): Promise<VaultRecord> {
+    return apiClient.get<VaultRecord>(`/vaults/${id}`, { token });
+  },
+
+  async create(req: CreateVaultRequest, token?: string): Promise<VaultRecord> {
+    return apiClient.post<VaultRecord>("/vaults", req, { token });
+  },
+
+  async update(id: string, req: UpdateVaultRequest, token?: string): Promise<VaultRecord> {
+    return apiClient.patch<VaultRecord>(`/vaults/${id}`, req, { token });
+  },
+};
+
+export const analyzeService = {
+  async analyze(req: AnalyzeRequest, token?: string): Promise<AnalyzeResponse> {
+    const validatedRequest = await validateAnalyzeRequest(req);
+    return apiClient.post<AnalyzeResponse>("/analyze", validatedRequest, { token });
+  },
+
+  async analyzeWasm(
     req: AnalyzeWasmRequest,
     token?: string,
   ): Promise<AnalyzeResponse> {
-    return apiClient.post<AnalyzeResponse>("/analyze/wasm", req, { token });
+    const validatedRequest = await validateAnalyzeWasmRequest(req);
+    return apiClient.post<AnalyzeResponse>("/analyze/wasm", validatedRequest, { token });
   },
 };
