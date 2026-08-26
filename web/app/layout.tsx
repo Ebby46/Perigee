@@ -17,11 +17,9 @@ import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import { NetworkStatusBanner } from '@/components/NetworkStatusBanner';
 import { API_URL } from '@/lib/api';
-
-// TODO: Move these from pages/_app.tsx during migration
-// import { ErrorBoundary } from '@/components/ErrorBoundary';
-// import { WalletProvider } from '@/context/WalletContext';
-// import '@/styles/globals.css';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { WalletProvider } from '@/context/WalletContext';
+import '@/styles/globals.css';
 
 export const metadata: Metadata = {
   title: {
@@ -36,15 +34,12 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <body>
-        {/* TODO: Wrap with providers from pages/_app.tsx during migration:
-          <ErrorBoundary>
-            <WalletProvider>
-              {children}
-            </WalletProvider>
-          </ErrorBoundary>
-        */}
-        <NetworkStatusBanner apiUrl={API_URL} />
-        {children}
+        <ErrorBoundary>
+          <WalletProvider>
+            <NetworkStatusBanner apiUrl={API_URL} />
+            {children}
+          </WalletProvider>
+        </ErrorBoundary>
       </body>
     </html>
   );
