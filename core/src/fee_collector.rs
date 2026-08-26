@@ -1,10 +1,12 @@
 use crate::fee_store::{FeeStore, LedgerFeeSample};
 use crate::rpc_provider::ProviderRegistry;
+use crate::stellar_service::{StellarService, StellarServiceConfig, StellarServiceError};
 use chrono::Utc;
-use reqwest::Client;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::Mutex;
 use tracing;
 
 /// Errors that can occur during fee collection
@@ -51,9 +53,10 @@ impl Default for FeeCollectorConfig {
 pub struct FeeCollector {
     registry: Arc<ProviderRegistry>,
     store: Arc<FeeStore>,
-    client: Client,
+    stellar_service: Arc<StellarService>,
     config: FeeCollectorConfig,
     last_collected_sequence: std::sync::atomic::AtomicU64,
+    collecting: Arc<AtomicBool>,
 }
 
 impl FeeCollector {
@@ -63,15 +66,18 @@ impl FeeCollector {
         store: Arc<FeeStore>,
         config: FeeCollectorConfig,
     ) -> Self {
+        let svc_config = StellarServiceConfig::default()
+            .with_timeout(config.request_timeout)
+            // Fee collection is a background probe — one retry is enough.
+            .with_max_attempts(2);
+        let stellar_service = Arc::new(StellarService::new(Arc::clone(&registry), svc_config));
         Self {
             registry,
             store,
-            client: Client::builder()
-                .timeout(config.request_timeout)
-                .build()
-                .expect("Failed to create HTTP client"),
+            stellar_service,
             config,
             last_collected_sequence: std::sync::atomic::AtomicU64::new(0),
+            collecting: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -96,6 +102,24 @@ impl FeeCollector {
 
     /// Collect fee data from the latest ledger
     async fn collect_latest_fees(&self) -> Result<(), FeeCollectorError> {
+        // Prevent concurrent collection runs
+        if self.collecting.compare_exchange(
+            false,
+            true,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ).is_err() {
+            tracing::debug!("Collection already in progress, skipping");
+            return Ok(());
+        }
+
+        let result = self.collect_latest_fees_inner().await;
+
+        self.collecting.store(false, Ordering::Release);
+        result
+    }
+
+    async fn collect_latest_fees_inner(&self) -> Result<(), FeeCollectorError> {
         // Get latest ledger sequence
         let latest_sequence = self.get_latest_ledger_sequence().await?;
 
@@ -143,41 +167,18 @@ impl FeeCollector {
             return Err(FeeCollectorError::NoHealthyProviders);
         }
 
-        // Try the first healthy provider
         let provider = &providers[0];
 
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getLatestLedger",
-            "params": null
-        });
-
-        let mut req = self.client.post(&provider.url).json(&body);
-
-        // Attach auth headers if present
-        if let (Some(header), Some(value)) = (&provider.auth_header, &provider.auth_value) {
-            req = req.header(header.as_str(), value.as_str());
-        }
-
-        let response = req
-            .send()
+        let raw = self
+            .stellar_service
+            .call_rpc(provider, "getLatestLedger", serde_json::Value::Null)
             .await
-            .map_err(|e| FeeCollectorError::RpcRequestFailed(e.to_string()))?;
+            .map_err(|e| match e {
+                StellarServiceError::NoHealthyProviders => FeeCollectorError::NoHealthyProviders,
+                other => FeeCollectorError::RpcRequestFailed(other.to_string()),
+            })?;
 
-        if !response.status().is_success() {
-            return Err(FeeCollectorError::RpcRequestFailed(format!(
-                "HTTP {}",
-                response.status()
-            )));
-        }
-
-        let json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| FeeCollectorError::ParseError(e.to_string()))?;
-
-        let sequence = json["result"]["sequence"].as_u64().ok_or_else(|| {
+        let sequence = raw["result"]["sequence"].as_u64().ok_or_else(|| {
             FeeCollectorError::ParseError("Missing sequence in response".to_string())
         })?;
 
@@ -213,41 +214,17 @@ impl FeeCollector {
         provider: &crate::rpc_provider::RpcProvider,
         sequence: u64,
     ) -> Result<LedgerFeeSample, FeeCollectorError> {
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getLedgers",
-            "params": {
-                "startLedger": sequence,
-                "limit": 1
-            }
-        });
-
-        let mut req = self.client.post(&provider.url).json(&body);
-
-        if let (Some(header), Some(value)) = (&provider.auth_header, &provider.auth_value) {
-            req = req.header(header.as_str(), value.as_str());
-        }
-
-        let response = req
-            .send()
+        let raw = self
+            .stellar_service
+            .call_rpc(
+                provider,
+                "getLedgers",
+                serde_json::json!({ "startLedger": sequence, "limit": 1 }),
+            )
             .await
             .map_err(|e| FeeCollectorError::RpcRequestFailed(e.to_string()))?;
 
-        if !response.status().is_success() {
-            return Err(FeeCollectorError::RpcRequestFailed(format!(
-                "HTTP {}",
-                response.status()
-            )));
-        }
-
-        let json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| FeeCollectorError::ParseError(e.to_string()))?;
-
-        // Parse ledger data from response
-        let ledgers = json["result"]["ledgers"]
+        let ledgers = raw["result"]["ledgers"]
             .as_array()
             .ok_or_else(|| FeeCollectorError::ParseError("Missing ledgers array".to_string()))?;
 
@@ -267,42 +244,22 @@ impl FeeCollector {
         provider: &crate::rpc_provider::RpcProvider,
         sequence: u64,
     ) -> Result<LedgerFeeSample, FeeCollectorError> {
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTransactions",
-            "params": {
-                "startLedger": sequence,
-                "limit": 100
-            }
-        });
-
-        let mut req = self.client.post(&provider.url).json(&body);
-
-        if let (Some(header), Some(value)) = (&provider.auth_header, &provider.auth_value) {
-            req = req.header(header.as_str(), value.as_str());
-        }
-
-        let response = req
-            .send()
+        let raw = self
+            .stellar_service
+            .call_rpc(
+                provider,
+                "getTransactions",
+                serde_json::json!({ "startLedger": sequence, "limit": 100 }),
+            )
             .await
             .map_err(|e| FeeCollectorError::RpcRequestFailed(e.to_string()))?;
 
-        if !response.status().is_success() {
-            return Err(FeeCollectorError::RpcRequestFailed(format!(
-                "HTTP {}",
-                response.status()
-            )));
-        }
-
-        let json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| FeeCollectorError::ParseError(e.to_string()))?;
-
-        let transactions = json["result"]["transactions"].as_array().ok_or_else(|| {
-            FeeCollectorError::ParseError("Missing transactions array".to_string())
-        })?;
+        let transactions =
+            raw["result"]["transactions"]
+                .as_array()
+                .ok_or_else(|| {
+                    FeeCollectorError::ParseError("Missing transactions array".to_string())
+                })?;
 
         // Calculate fee statistics from transactions
         let mut total_fee_charged: i64 = 0;
@@ -385,6 +342,19 @@ impl FeeCollector {
     }
 }
 
+// ---------------------------------------------------------------------------
+// deduct_network_fees — subtract gas cost from NAVs before HWM compare (Issue #61)
+// ---------------------------------------------------------------------------
+
+/// Deduct per-transaction network/gas fees from a list of NAV values.
+/// Returns a new Vec with gas costs subtracted, clamped to zero.
+pub fn deduct_network_fees(navs: Vec<f64>, gas_cost_per_tx: f64, tx_count: usize) -> Vec<f64> {
+    let total_gas = gas_cost_per_tx * tx_count as f64;
+    navs.into_iter()
+        .map(|nav| (nav - total_gas).max(0.0))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +365,19 @@ mod tests {
         assert_eq!(config.collection_interval_secs, 5);
         assert_eq!(config.batch_size, 10);
         assert_eq!(config.request_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_deduct_network_fees() {
+        let navs = vec![1000.0, 2000.0, 500.0];
+        let result = deduct_network_fees(navs, 10.0, 5);
+        assert_eq!(result, vec![950.0, 1950.0, 450.0]);
+    }
+
+    #[test]
+    fn test_deduct_network_fees_clamp_to_zero() {
+        let navs = vec![30.0, 10.0];
+        let result = deduct_network_fees(navs, 10.0, 5);
+        assert_eq!(result, vec![0.0, 0.0]);
     }
 }

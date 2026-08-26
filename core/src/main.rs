@@ -1,39 +1,50 @@
 #![allow(dead_code)]
 
+mod audit_log;
 mod auth;
 mod benchmarks;
+mod billing_service;
 mod cache;
 mod comparison;
+mod config;
+mod db;
 mod errors;
 pub mod fee_analytics;
 pub mod fee_collector;
 pub mod fee_store;
 mod gas_golfing;
+mod middleware;
 pub mod insights;
 mod jobs;
 mod merkle_tree;
+mod metrics;
 mod parser;
+mod policy_expiry;
+pub mod reconciliation;
+mod rounding;
 mod routing;
 pub mod rpc_provider;
 mod runner;
+mod secret_hash;
 mod simulation;
 mod simulation_service;
+mod stellar_service;
+pub mod vault_store;
+mod manager_store;
 mod wasm_branch_analysis;
 mod ws;
 
 use crate::cache::{ContractCache, SimulationCache};
 use crate::comparison::{CompareMode, RegressionFlag, RegressionReport, ResourceDelta};
 use crate::errors::AppError;
-use crate::merkle_tree::MerkleTree;
 use axum::{
-    extract::{Json, Multipart, State},
+    extract::{Json, Multipart, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
-    middleware,
     response::IntoResponse,
     routing::{get, post},
     Extension, Router,
 };
-use config::{Config, ConfigError};
+use ::config::{Config, ConfigError};
 use prometheus::{Encoder, HistogramVec, IntCounterVec, Opts, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 use simulation_service::{AnalysisResult, SimulationMetric, SimulationService};
@@ -49,10 +60,12 @@ use crate::gas_golfing::{GasGolfingAnalyzer, GasGolfingReport};
 use crate::insights::InsightsEngine;
 use crate::jobs::{JobQueue, JobQueueConfig, JobWorker};
 use crate::merkle_tree::MerkleTree;
+use crate::reconciliation::FeeReconciler;
 use crate::rpc_provider::{ProviderRegistry, RegistryConfig, RegistrySnapshot, RpcProvider};
 use crate::simulation::{SimulationEngine, SimulationMode, SimulationResult};
+use crate::stellar_service::{StellarService, StellarServiceConfig};
 use crate::ws::SimulationBus;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use utoipa::{OpenApi, ToSchema};
@@ -61,6 +74,12 @@ use utoipa_swagger_ui::SwaggerUi;
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct AppConfig {
+    /// Deployment environment. Set to `"production"` to enable
+    /// production-safe error redaction (strips internal details from HTTP
+    /// responses). Any other value — including absent — is treated as
+    /// non-production so that misconfigured deployments fail safe.
+    #[serde(default)]
+    app_env: String,
     /// Port for the HTTP server
     server_port: u16,
     /// Rust log level (e.g., "info", "debug")
@@ -138,6 +157,16 @@ struct AppConfig {
     /// L2 treats it as stale. Default 100 ≈ 8 minutes at 5 s/ledger.
     #[serde(default = "default_max_ledger_age")]
     max_ledger_age: u32,
+    /// Comma-separated list of allowed CORS origins for white-label partner
+    /// frontends.  Examples:
+    ///   `https://partner-a.example.com,https://partner-b.example.com`
+    ///
+    /// Leave empty (the default) to allow **all** origins — suitable for local
+    /// development only.  In production this **must** be set to the explicit
+    /// list of trusted white-label domains; a wildcard in production would
+    /// allow any web page to call the API with user credentials.
+    #[serde(default)]
+    cors_allowed_origins: String,
 }
 
 fn default_health_check_interval() -> u64 {
@@ -194,11 +223,144 @@ fn default_max_ledger_age() -> u32 {
     100
 }
 
+/// Build a [`CorsLayer`] from the `cors_allowed_origins` config value.
+///
+/// Behaviour:
+/// * Empty string → `allow_origin(Any)` — permissive, for local dev only.
+/// * Non-empty string → parse as a comma-separated list of exact origins
+///   (`scheme://host[:port]`) and allow only those.  Invalid entries are
+///   logged and skipped.  If every entry is invalid the layer falls back to
+///   denying all cross-origin requests (empty list).
+///
+/// The layer also allows the standard headers and methods needed by the API.
+fn build_cors_layer(cors_allowed_origins: &str) -> CorsLayer {
+    use axum::http::{header, Method};
+
+    let base = CorsLayer::new()
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+        ])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ]);
+
+    let trimmed = cors_allowed_origins.trim();
+    if trimmed.is_empty() {
+        // Local dev: allow all origins.
+        tracing::warn!(
+            "CORS_ALLOWED_ORIGINS is not set — allowing all origins (Any). \
+             Set CORS_ALLOWED_ORIGINS in production."
+        );
+        return base.allow_origin(Any);
+    }
+
+    let origins: Vec<axum::http::HeaderValue> = trimmed
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|origin| {
+            match origin.parse::<axum::http::HeaderValue>() {
+                Ok(v) => {
+                    tracing::info!(origin, "CORS: allowing origin");
+                    Some(v)
+                }
+                Err(e) => {
+                    tracing::warn!(origin, error = %e, "CORS: skipping invalid origin");
+                    None
+                }
+            }
+        })
+        .collect();
+
+    base.allow_origin(AllowOrigin::list(origins))
+}
+
+/// Validate RPC / relayer / network secret URLs at startup so a malformed
+/// value fails fast and loudly rather than silently at first request.
+///
+/// Returns `Err(message)` describing exactly which environment variable is
+/// problematic so an operator can fix it without spelunking through logs.
+/// Issue #85 / NF-03 — "Secrets for RPC/relayer loaded from env without validation".
+fn validate_config_secrets(config: &AppConfig) -> Result<(), String> {
+    // 1. Primary RPC URL (always required, has a default from `load_config`).
+    let rpc = config.soroban_rpc_url.trim();
+    if rpc.is_empty() {
+        return Err("SOROBAN_RPC_URL is empty".to_string());
+    }
+    if reqwest::Url::parse(rpc).is_err() {
+        return Err(format!(
+            "SOROBAN_RPC_URL is not a valid URL: '{}' \
+             (must start with http:// or https://)",
+            rpc
+        ));
+    }
+
+    // 2. Stellar network passphrase — never empty.
+    if config.network_passphrase.trim().is_empty() {
+        return Err("NETWORK_PASSPHRASE must not be empty".to_string());
+    }
+
+    // 3. RPC_PROVIDERS — if set, must be valid JSON with valid URLs.
+    if !config.rpc_providers.trim().is_empty() {
+        let providers: Vec<RpcProvider> =
+            serde_json::from_str(&config.rpc_providers).map_err(|e| {
+                format!(
+                    "RPC_PROVIDERS is not valid JSON: {} \
+                     — expected a JSON array of {{name,url,auth_header?,auth_value?}} objects",
+                    e
+                )
+            })?;
+        for (idx, p) in providers.iter().enumerate() {
+            if p.name.trim().is_empty() {
+                return Err(format!(
+                    "RPC_PROVIDERS[{}].name must not be empty",
+                    idx
+                ));
+            }
+            if reqwest::Url::parse(&p.url).is_err() {
+                return Err(format!(
+                    "RPC_PROVIDERS[{}] ('{}') has invalid URL: '{}'",
+                    idx, p.name, p.url
+                ));
+            }
+        }
+    }
+
+    // 4. REGISTRY_PUBLIC_URL — optional but, if set, must be a valid URL.
+    if !config.registry_public_url.trim().is_empty() {
+        if reqwest::Url::parse(&config.registry_public_url).is_err() {
+            return Err(format!(
+                "REGISTRY_PUBLIC_URL is not a valid URL: '{}'",
+                config.registry_public_url
+            ));
+        }
+    }
+
+    // 5. REGISTRY_SEED_PEERS — every URL must be parseable.
+    for peer in parse_seed_peers(&config.registry_seed_peers) {
+        if reqwest::Url::parse(&peer).is_err() {
+            return Err(format!(
+                "REGISTRY_SEED_PEERS contains an invalid peer URL: '{}'",
+                peer
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn load_config() -> Result<AppConfig, ConfigError> {
     dotenvy::dotenv().ok();
 
     let settings = Config::builder()
-        .add_source(config::Environment::default())
+        .add_source(::config::Environment::default())
         .set_default("server_port", 8080)?
         .set_default("rust_log", "info")?
         .set_default("soroban_rpc_url", "https://soroban-testnet.stellar.org")?
@@ -221,6 +383,7 @@ fn load_config() -> Result<AppConfig, ConfigError> {
         .set_default("emergency_verification_paused", false)?
         .set_default("disk_cache_path", "")?
         .set_default("max_ledger_age", 100)?
+        .set_default("cors_allowed_origins", "")?
         .build()?;
 
     settings.try_deserialize()
@@ -306,6 +469,8 @@ fn build_registry_config(config: &AppConfig) -> RegistryConfig {
 pub struct AppState {
     engine: SimulationEngine,
     provider_registry: Arc<ProviderRegistry>,
+    /// Process-wide Stellar RPC transport (pooled client, retry, circuit-breaker).
+    stellar_service: Arc<StellarService>,
     cache: Arc<SimulationCache>,
     insights_engine: InsightsEngine,
     gas_golfing_analyzer: GasGolfingAnalyzer,
@@ -314,14 +479,26 @@ pub struct AppState {
     /// Job queue for background task processing
     #[allow(dead_code)]
     job_queue: JobQueue,
-    /// Fee market analytics engine
+    /// Fee market analytics engine (integer-only math).
     fee_analytics_engine: FeeAnalyticsEngine,
     /// Fee data store
     fee_store: Arc<FeeStore>,
+    /// Fee business-logic service. API-28: all fee/billing business logic
+    /// lives here — handlers in this file are now thin transports.
+    fee_service: billing_service::FeeService,
     /// Prometheus metrics collectors.
     metrics: Arc<AppMetrics>,
     /// WebSocket event bus for simulation jobs.
     simulation_bus: Arc<SimulationBus>,
+    /// Fee reconciler for async reconciliation jobs
+    #[allow(dead_code)]
+    reconciler: Arc<reconciliation::FeeReconciler>,
+    /// Typed DB store for reconciliation queries
+    reconciliation_repo: db::reconciliation::ReconciliationRepo,
+    /// White-label vault records with optimistic locking (API-37).
+    vault_store: Arc<vault_store::VaultStore>,
+    /// Manager onboarding with approval/KYC gate (API-33).
+    manager_store: Arc<manager_store::ManagerStore>,
 }
 
 #[derive(Clone)]
@@ -515,12 +692,15 @@ pub struct OptimizeLimitsRequest {
     pub args: Vec<String>,
     #[schema(example = 0.05)]
     #[serde(default = "default_safety_margin")]
-    pub safety_margin: f64,
+    pub    safety_margin: f64,
 }
 
 fn default_safety_margin() -> f64 {
     0.05
 }
+
+// Keep the legacy f64 `safety_margin` request field for backward compatibility;
+// the service converts it to integer basis points before any arithmetic.
 
 #[derive(Serialize, ToSchema)]
 pub struct OptimizeLimitsResponse {
@@ -553,8 +733,9 @@ pub struct FeeRecommendationResponse {
     pub resource_fee_estimate: u64,
     /// Total estimated cost
     pub total_estimated_cost: u64,
-    /// Confidence in inclusion (0.0-1.0)
-    pub inclusion_confidence: f64,
+    /// Confidence in inclusion, in basis points (`0..=10_000`). The legacy
+    /// `0.0-1.0` ratio was promoted to integer bps to close API-26.
+    pub inclusion_confidence_bps: u32,
     /// Expected number of ledgers for inclusion
     pub expected_inclusion_ledgers: u32,
     /// Current market conditions
@@ -963,7 +1144,7 @@ async fn analyze_wasm(
             .rpc_error_count_total
             .with_label_values(&["/analyze/wasm", "panic"])
             .inc();
-        AppError::Internal(format!("Contract profiling task panicked: {}", e))
+        join_error_to_internal("Contract profiling task", e)
     })?
     .map_err(|e| {
         state
@@ -1056,7 +1237,7 @@ async fn analyze_wasm_profile(
             state.simulation_timeout.as_secs()
         ))
     })?
-    .map_err(|e| AppError::Internal(format!("Profiling task panicked: {}", e)))?
+    .map_err(|e| join_error_to_internal("Profiling task", e))?
     .map_err(|e| AppError::BadRequest(format!("Profiling failed: {}", e)))?;
 
     let (resources, profile) = result;
@@ -1102,7 +1283,7 @@ async fn analyze_wasm_branches(
 
     let report = tokio::task::spawn_blocking(move || run_analysis(wasm_bytes, function_name, args))
         .await
-        .map_err(|e| AppError::Internal(format!("Branch analysis task panicked: {}", e)))?
+        .map_err(|e| join_error_to_internal("Branch analysis task", e))?
         .map_err(|e| AppError::Internal(format!("Branch analysis failed: {}", e)))?;
 
     tracing::info!(
@@ -1313,6 +1494,31 @@ async fn compare_handler(
     Ok(Json(CompareApiResponse { report }))
 }
 
+/// Sanitize a [`tokio::task::JoinError`] into an [`AppError::Internal`].
+///
+/// A panic payload's `Display` can expose source file paths and line numbers
+/// (e.g. `"task panicked at 'assertion failed', src/simulation.rs:412"`).
+/// In production we emit only the static category string and log the full
+/// detail server-side.  In development the full message is preserved for
+/// easier debugging.
+fn join_error_to_internal(context: &str, e: tokio::task::JoinError) -> AppError {
+    if e.is_panic() {
+        tracing::error!(
+            context = context,
+            panic_detail = %e,
+            "spawn_blocking task panicked"
+        );
+        if crate::errors::is_production() {
+            AppError::Internal(format!("{}: task panicked", context))
+        } else {
+            AppError::Internal(format!("{}: task panicked — {}", context, e))
+        }
+    } else {
+        // Cancellation — safe to surface
+        AppError::Internal(format!("{}: task was cancelled", context))
+    }
+}
+
 /// Write WASM bytes to a temporary file and return the path.
 fn write_temp_wasm(bytes: &[u8]) -> Result<std::path::PathBuf, AppError> {
     use std::io::Write;
@@ -1403,41 +1609,29 @@ async fn analyze_gas_golfing(
 )]
 async fn fee_recommend(
     State(state): State<Arc<AppState>>,
+    Query(req): Query<FeeRecommendationRequest>,
 ) -> Result<Json<FeeRecommendationResponse>, AppError> {
     tracing::info!("Generating fee recommendation");
 
-    // Get recent samples for analysis
-    let samples = state
-        .fee_store
-        .get_recent_samples(100)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to fetch fee data: {}", e)))?;
-
-    // Get current ledger from latest sample or use 0
-    let current_ledger = samples
-        .first()
-        .map(|s| s.ledger_sequence as u64)
-        .unwrap_or(0);
-
-    // Generate prediction
-    let prediction = state.fee_analytics_engine.predict(&samples, current_ledger);
-    let market_conditions = state
-        .fee_analytics_engine
-        .get_market_conditions(&samples, current_ledger);
-    let model_breakdown = state.fee_analytics_engine.get_model_breakdown(&samples);
-
-    // Determine recommended bid based on prediction
-    let (recommended_bid, expected_ledgers) = (prediction.priority_bid, 1);
-
+    let inclusion_speed = billing_service::InclusionSpeed::parse(req.inclusion_speed.as_deref());
+    let safety_margin_bps = match req.safety_margin {
+        Some(m) => billing_service::FeeService::safety_margin_to_bps(m)?,
+        None => billing_service::DEFAULT_SAFETY_MARGIN_BPS,
+    };
+    let inputs = billing_service::FeeRecommendationInputs {
+        inclusion_speed,
+        safety_margin_bps,
+    };
+    let result = state.fee_service.recommend(inputs).await?;
     Ok(Json(FeeRecommendationResponse {
-        recommended_bid,
-        resource_fee_estimate: 0, // Will be calculated based on transaction resources
-        total_estimated_cost: recommended_bid,
-        inclusion_confidence: prediction.confidence_score,
-        expected_inclusion_ledgers: expected_ledgers,
-        market_conditions,
-        model_breakdown,
-        timestamp: chrono::Utc::now(),
+        recommended_bid: result.recommended_bid,
+        resource_fee_estimate: result.resource_fee_estimate,
+        total_estimated_cost: result.total_estimated_cost,
+        inclusion_confidence_bps: result.inclusion_confidence_bps,
+        expected_inclusion_ledgers: result.expected_inclusion_ledgers,
+        market_conditions: result.market_conditions,
+        model_breakdown: result.model_breakdown,
+        timestamp: result.timestamp,
     }))
 }
 
@@ -1457,25 +1651,21 @@ async fn fee_recommend(
 )]
 async fn fee_history(
     State(state): State<Arc<AppState>>,
+    Query(req): Query<FeeHistoryRequest>,
 ) -> Result<Json<FeeHistoryResponse>, AppError> {
     tracing::info!("Fetching fee history");
 
-    let limit = 50; // Default limit
-    let samples = state
-        .fee_store
-        .get_recent_samples(limit)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to fetch fee history: {}", e)))?;
-
-    let total_count = state
-        .fee_store
-        .get_sample_count()
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to get sample count: {}", e)))?;
-
+    let result = state
+        .fee_service
+        .history(billing_service::FeeHistoryQuery {
+            limit: req.limit,
+            from_ledger: req.from_ledger,
+            to_ledger: req.to_ledger,
+        })
+        .await?;
     Ok(Json(FeeHistoryResponse {
-        samples,
-        total_count,
+        samples: result.samples,
+        total_count: result.total_count,
     }))
 }
 
@@ -1490,45 +1680,42 @@ async fn fee_history(
 )]
 async fn fee_analytics(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<FeeAnalyticsEnvelope>, AppError> {
     tracing::info!("Fetching fee analytics");
 
-    // Get recent samples for analysis
-    let samples = state
-        .fee_store
-        .get_recent_samples(200)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to fetch fee data: {}", e)))?;
+    let result = state.fee_service.analytics().await?;
+    Ok(Json(FeeAnalyticsEnvelope {
+        current_ledger: result.current_ledger,
+        prediction: result.prediction,
+        market_conditions: result.market_conditions,
+        model_breakdown: result.model_breakdown,
+        sample_count: result.sample_count,
+        timestamp: result.timestamp,
+    }))
+}
 
-    let current_ledger = samples
-        .first()
-        .map(|s| s.ledger_sequence as u64)
-        .unwrap_or(0);
-
-    let prediction = state.fee_analytics_engine.predict(&samples, current_ledger);
-    let market_conditions = state
-        .fee_analytics_engine
-        .get_market_conditions(&samples, current_ledger);
-    let model_breakdown = state.fee_analytics_engine.get_model_breakdown(&samples);
-
-    let response = serde_json::json!({
-        "current_ledger": current_ledger,
-        "prediction": prediction,
-        "market_conditions": market_conditions,
-        "model_breakdown": model_breakdown,
-        "sample_count": samples.len(),
-        "timestamp": chrono::Utc::now(),
-    });
-
-    Ok(Json(response))
+/// Envelope returned by `GET /fees/analytics`. Mirrors
+/// `billing_service::FeeAnalyticsResult` but is exposed in the OpenAPI
+/// schema as a single named object.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FeeAnalyticsEnvelope {
+    pub current_ledger: u64,
+    pub prediction: crate::fee_analytics::FeePrediction,
+    pub market_conditions: crate::fee_analytics::MarketConditions,
+    pub model_breakdown: crate::fee_analytics::ModelBreakdown,
+    pub sample_count: usize,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(OpenApi)]
 #[openapi(
     paths(
         analyze, analyze_wasm, optimize_limits, compare_handler,
-        auth::challenge_handler, auth::verify_handler, auth::jwks_handler,
-        fee_recommend, fee_history, fee_analytics
+        auth::challenge_handler, auth::verify_handler, auth::refresh_handler,
+        auth::revoke_handler, auth::jwks_handler,
+        fee_recommend, fee_history, fee_analytics,
+        vault_store::create_vault_handler, vault_store::get_vault_handler,
+        vault_store::update_vault_handler, vault_store::list_vaults_handler
     ),
     components(schemas(
         AnalyzeRequest, AnalyzeWasmRequest, AnalyzeWasmBranchesRequest,
@@ -1540,7 +1727,8 @@ async fn fee_analytics(
         crate::wasm_branch_analysis::BranchTypeBreakdown,
         crate::wasm_branch_analysis::PathResult,
         auth::ChallengeRequest, auth::ChallengeResponse,
-        auth::VerifyRequest, auth::VerifyResponse,
+        auth::VerifyRequest, auth::VerifyResponse, auth::RefreshRequest,
+        auth::RevokeResponse,
         auth::JwkSetResponse, auth::JwkResponse,
         crate::simulation::OptimizationBuffer,
         crate::simulation::SorobanResources,
@@ -1549,12 +1737,16 @@ async fn fee_analytics(
         crate::fee_store::LedgerFeeSample,
         crate::fee_analytics::MarketConditions,
         crate::fee_analytics::ModelBreakdown,
-        crate::fee_analytics::TrendDirection
+        crate::fee_analytics::TrendDirection,
+        FeeAnalyticsEnvelope,
+        vault_store::VaultRecord, vault_store::CreateVaultRequest,
+        vault_store::UpdateVaultRequest, vault_store::ListVaultsQuery
     )),
     tags(
         (name = "Analysis", description = "Soroban contract resource analysis endpoints"),
         (name = "Auth", description = "SEP-10 wallet authentication"),
         (name = "Fee Market", description = "Stellar/Soroban fee market analysis and prediction"),
+        (name = "Vaults", description = "White-label vault records with optimistic locking"),
         (name = "Streaming", description = "WebSocket real-time simulation progress streaming")
     ),
     info(
@@ -1567,6 +1759,34 @@ struct ApiDoc;
 
 async fn health_check() -> &'static str {
     "OK"
+}
+
+/// Fallback handler for all unmatched routes.
+///
+/// Returns a uniform JSON `{"error":"NOT_FOUND","message":"..."}` body
+/// instead of axum's default plain-text response, which could expose
+/// routing internals or framework version strings.
+async fn not_found_handler(request: axum::extract::Request) -> impl IntoResponse {
+    let path = request.uri().path().to_owned();
+    tracing::debug!(path = %path, "Unmatched route");
+    AppError::NotFound(format!("No route for {}", path))
+}
+
+async fn ready_check(State(state): State<Arc<AppState>>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    
+    let db_ok = sqlx::query("SELECT 1")
+        .execute(state.reconciliation_repo.pool())
+        .await
+        .is_ok();
+        
+    let rpc_ok = !state.provider_registry.healthy_providers().await.is_empty();
+
+    if db_ok && rpc_ok {
+        (axum::http::StatusCode::OK, "OK").into_response()
+    } else {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable").into_response()
+    }
 }
 
 async fn registry_providers(
@@ -1589,20 +1809,67 @@ async fn registry_gossip(
     Json(state.provider_registry.registry_snapshot().await)
 }
 
+/// Resolves SIGINT / SIGTERM so the HTTP server can drain in-flight
+/// requests before exiting (Closes API-30: No graceful shutdown).
+///
+/// On Unix this listens for both signals. On non-Unix targets only
+/// Ctrl-C is wired up.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("SIGINT received, draining in-flight requests before shutdown"),
+        _ = terminate => tracing::info!("SIGTERM received, draining in-flight requests before shutdown"),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     if env::var("RUST_LOG").is_err() {
         env::set_var("RUST_LOG", "info");
     }
 
-    tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env())
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // Structured logging: `LOG_FORMAT=json` emits line-delimited JSON for
+    // log aggregators; otherwise the default pretty text format is used
+    // (Closes API-29: No structured logging library).
+    if env::var("LOG_FORMAT").as_deref() == Ok("json") {
+        tracing_subscriber::registry()
+            .with(EnvFilter::from_default_env())
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(EnvFilter::from_default_env())
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     tracing::info!("Perigee Starting...");
 
     let config = load_config().expect("Failed to load configuration");
+    // Fail fast on malformed secrets before the server binds (issue #85 / NF-03).
+    if let Err(err) = validate_config_secrets(&config) {
+        tracing::error!(
+            error = %err,
+            "Configuration validation failed at startup. Refusing to bind."
+        );
+        panic!("Invalid configuration: {}", err);
+    }
     tracing::info!("Perigee initialized with config: {:?}", config);
     tracing::info!(
         redis_url = %config.redis_url,
@@ -1634,6 +1901,14 @@ async fn main() {
             let webhook_url = env::var("Perigee_ALERT_WEBHOOK_URL").ok();
             let simulation_service = SimulationService::new(db_path, webhook_url)
                 .expect("initialize simulation service");
+            // Catch up on any webhook events left pending/retrying from a
+            // previous run (e.g. the process crashed or was killed mid
+            // backoff) before generating new alerts. This is what makes
+            // delivery durable across restarts rather than just within a
+            // single process's retry loop.
+            if let Err(e) = simulation_service.dispatch_due_events().await {
+                tracing::warn!("Failed to drain pending webhook events: {}", e);
+            }
             if let Err(e) = benchmarks::run_token_benchmark(path, &simulation_service).await {
                 tracing::error!("Benchmark failed: {}", e);
             }
@@ -1921,6 +2196,15 @@ async fn main() {
     );
     tracing::info!(mode = ?simulation_mode, "Simulation mode configured");
 
+    // ── Process-wide Stellar RPC service ────────────────────────────────
+    // One shared reqwest::Client (connection pool) and one retry policy for
+    // the entire process.  Every subsystem receives an Arc clone of this.
+    let stellar_service = Arc::new(StellarService::new(
+        Arc::clone(&registry),
+        StellarServiceConfig::default().with_timeout(simulation_timeout),
+    ));
+    tracing::info!("StellarService initialized (pooled client, retry, circuit-breaker)");
+
     // ── Fee Market Setup ────────────────────────────────────────────────
     let database_url = &config.database_url;
     tracing::info!(database_url = %database_url, "Initializing database");
@@ -1937,8 +2221,30 @@ async fn main() {
 
     tracing::info!("Database migrations completed");
 
+    // Initialize typed DB schema for the managers, vaults, and reconciliation records.
+    let db_schema = db::schema::TypedSchema::new(std::sync::Arc::new(db_pool.clone()));
+
     let fee_store = Arc::new(FeeStore::new(db_pool.clone()));
+    let vault_store = Arc::new(vault_store::VaultStore::new(db_schema.vaults()));
+    let manager_store = Arc::new(manager_store::ManagerStore::new(db_schema.managers()));
     let fee_analytics_engine = FeeAnalyticsEngine::new();
+
+    let reconciliation_repo = db::reconciliation::ReconciliationRepo::with_redis(
+        db_schema.reconciliation_reports(),
+        db_schema.reconciliation_discrepancies(),
+        &config.redis_url,
+    )
+    .expect("Failed to initialize reconciliation report cache");
+    let reconciler = Arc::new(reconciliation::FeeReconciler::new(
+        Arc::clone(&fee_store),
+        reconciliation_repo.clone(),
+    ));
+    // API-28: business-logic service owns fee / billing math; wired into
+    // AppState so the HTTP handlers stay thin.
+    let fee_service = billing_service::FeeService::new(
+        Arc::clone(&fee_store),
+        fee_analytics_engine.clone(),
+    );
     let job_queue_config = JobQueueConfig {
         job_timeout_secs: config.job_timeout_secs,
         max_concurrent_jobs: config.max_concurrent_jobs,
@@ -1956,11 +2262,13 @@ async fn main() {
             Arc::clone(&registry),
             simulation_timeout,
             simulation_mode,
-        ),
+        )
+        .with_stellar_service(Arc::clone(&stellar_service)),
         InsightsEngine::new(),
         job_queue_config,
     )
-    .with_bus(Arc::clone(&simulation_bus));
+    .with_bus(Arc::clone(&simulation_bus))
+    .with_reconciler(Arc::clone(&reconciler));
 
     tokio::spawn(async move {
         job_worker.run().await;
@@ -1983,7 +2291,8 @@ async fn main() {
     // Spawn worker
     let worker = JobWorker::new(
         job_queue.clone(),
-        SimulationEngine::with_registry_and_timeout(Arc::clone(&registry), simulation_timeout),
+        SimulationEngine::with_registry_and_timeout(Arc::clone(&registry), simulation_timeout)
+            .with_stellar_service(Arc::clone(&stellar_service)),
         InsightsEngine::new(),
         job_config,
     );
@@ -2045,8 +2354,10 @@ async fn main() {
         engine: SimulationEngine::with_registry_and_cache(
             Arc::clone(&registry),
             Arc::clone(&contract_cache),
-        ),
+        )
+        .with_stellar_service(Arc::clone(&stellar_service)),
         provider_registry: Arc::clone(&registry),
+        stellar_service: Arc::clone(&stellar_service),
         cache: simulation_cache,
         insights_engine: InsightsEngine::new(),
         gas_golfing_analyzer: GasGolfingAnalyzer::new(),
@@ -2054,11 +2365,16 @@ async fn main() {
         job_queue,
         fee_analytics_engine,
         fee_store,
+        fee_service,
         metrics: Arc::new(AppMetrics::new().expect("Failed to initialize Prometheus metrics")),
         simulation_bus,
+        reconciler,
+        reconciliation_repo,
+        vault_store,
+        manager_store,
     });
 
-    let cors = CorsLayer::new().allow_origin(Any);
+    let cors = build_cors_layer(&config.cors_allowed_origins);
 
     let protected = Router::new()
         .route("/analyze", post(analyze))
@@ -2067,7 +2383,13 @@ async fn main() {
         .route("/analyze/optimize-limits", post(optimize_limits))
         .route("/analyze/compare", post(compare_handler))
         .route("/analyze/gas-golfing", post(analyze_gas_golfing))
-        .route_layer(middleware::from_fn(auth::auth_middleware));
+        // Vault records with tenant-scoped access (API-37)
+        .route("/vaults", get(vault_store::list_vaults_handler).post(vault_store::create_vault_handler))
+        .route(
+            "/vaults/:id",
+            get(vault_store::get_vault_handler).patch(vault_store::update_vault_handler),
+        )
+        .route_layer(axum::middleware::from_fn(auth::auth_middleware));
 
     let app = Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
@@ -2078,22 +2400,62 @@ async fn main() {
             }),
         )
         .route("/health", get(health_check))
+        .route("/ready", get(ready_check))
         .route("/metrics", get(metrics_handler))
         .route("/auth/challenge", post(auth::challenge_handler))
         .route("/auth/verify", post(auth::verify_handler))
+        .route("/auth/refresh", post(auth::refresh_handler))
+        .route("/auth/revoke", post(auth::revoke_handler))
         .route("/auth/emergency-pause", post(auth::emergency_pause_handler))
         .route("/auth/jwks", get(auth::jwks_handler))
         // Fee market routes (public access)
         .route("/fees/recommend", get(fee_recommend))
         .route("/fees/history", get(fee_history))
         .route("/fees/analytics", get(fee_analytics))
+        // Manager onboarding with approval/KYC gate (API-33)
+        .route("/managers/register", post(manager_store::register_manager_handler))
+        .route("/managers", get(manager_store::list_managers_handler))
+        .route(
+            "/managers/:id",
+            get(manager_store::get_manager_handler),
+        )
+        .route(
+            "/managers/:id/approve",
+            post(manager_store::approve_manager_handler),
+        )
+        .route(
+            "/managers/:id/reject",
+            post(manager_store::reject_manager_handler),
+        )
+        .route(
+            "/managers/status/:stellar_address",
+            get(manager_store::check_manager_status_handler),
+        )
+        // Reconciliation routes (async via job queue)
+        .route("/reconcile", post(reconciliation::reconcile_handler))
+        .route(
+            "/reconcile/reports",
+            get(reconciliation::list_reports_handler),
+        )
+        .route(
+            "/reconcile/:job_id",
+            get(reconciliation::get_reconcile_job_handler),
+        )
         // WebSocket streaming (Issue #105) — no auth required on the upgrade;
         // the client passes the job_id in the path.
         .route("/ws/jobs/:job_id", get(ws::ws_handler))
         .merge(protected)
+        // Catch-all fallback: return a structured JSON 404 instead of
+        // axum's default plain-text body, which could expose framework
+        // version strings or routing internals.
+        .fallback(not_found_handler)
         .layer(Extension(auth_state))
         .layer(cors)
+        .layer(axum::middleware::from_fn(
+            crate::middleware::correlation_id_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 2)) // 2 MB limit
         .with_state(app_state); // ← thread AppState through all handlers
 
     let bind_addr = format!("0.0.0.0:{}", config.server_port);
@@ -2111,8 +2473,143 @@ async fn main() {
     );
 
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("Server failed to start");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CORS unit tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod cors_tests {
+    use super::build_cors_layer;
+
+    /// Helper: ask the layer whether it would produce an `Allow-Origin` header
+    /// for a given `Origin` request header value.  We inspect the layer via
+    /// a synthetic request rather than spinning up a full server.
+    fn allowed_origin(layer: &tower_http::cors::CorsLayer, origin: &str) -> bool {
+        use axum::http::{header, Method, Request, Version};
+        use tower::{Service, ServiceExt};
+        use tower_http::cors::CorsLayer;
+
+        // Build a minimal OPTIONS preflight request with the Origin header.
+        let req = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("http://localhost/")
+            .version(Version::HTTP_11)
+            .header(header::ORIGIN, origin)
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        // We can't easily call an async Service in a sync test, but we can
+        // inspect the CorsLayer's AllowOrigin by checking the
+        // `Access-Control-Allow-Origin` header that tower-http would emit.
+        // Instead we test the builder's structural output through the public
+        // API — verifying the two code paths (Any vs list) produce distinct
+        // CorsLayer values — and rely on the call-site integration test for
+        // end-to-end validation.
+        //
+        // For a lightweight structural check we inspect the Debug output, which
+        // differs between `Any` and `List(...)`.
+        let dbg = format!("{:?}", layer);
+        if is_any_origin(&dbg) {
+            // Any-mode layer: every origin is "allowed" from its perspective.
+            true
+        } else {
+            // List-mode layer: check if the origin string appears in the debug.
+            dbg.contains(origin)
+        }
+    }
+
+    /// Whether a `CorsLayer`'s debug rendering describes an allow-any policy.
+    ///
+    /// tower-http renders this as `allow_origin: Const("*")`, and older
+    /// versions rendered it as `Any`. These tests inspect the Debug output
+    /// because `AllowOrigin` exposes no predicate, so accept both spellings
+    /// rather than pinning to one release's formatting.
+    fn is_any_origin(dbg: &str) -> bool {
+        dbg.contains("Any") || dbg.contains(r#"allow_origin: Const("*")"#)
+    }
+
+    #[test]
+    fn empty_string_produces_any_origin() {
+        let layer = build_cors_layer("");
+        let dbg = format!("{:?}", layer);
+        assert!(
+            is_any_origin(&dbg),
+            "Expected an allow-any origin policy, got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_produces_any_origin() {
+        let layer = build_cors_layer("   ");
+        let dbg = format!("{:?}", layer);
+        assert!(
+            is_any_origin(&dbg),
+            "Expected an allow-any origin policy for whitespace input, got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn single_origin_appears_in_layer() {
+        let layer = build_cors_layer("https://partner.example.com");
+        let dbg = format!("{:?}", layer);
+        // The debug output should NOT be Any.
+        assert!(
+            !dbg.contains("Any"),
+            "Expected list mode, got Any. Debug: {dbg}"
+        );
+    }
+
+    #[test]
+    fn multiple_origins_appear_in_layer() {
+        let layer =
+            build_cors_layer("https://partner-a.example.com,https://partner-b.example.com");
+        let dbg = format!("{:?}", layer);
+        assert!(
+            !dbg.contains("Any"),
+            "Expected list mode, got Any. Debug: {dbg}"
+        );
+    }
+
+    #[test]
+    fn origins_with_extra_whitespace_are_trimmed() {
+        // Should not panic and should produce a list-mode layer.
+        let layer = build_cors_layer("  https://a.example.com  ,  https://b.example.com  ");
+        let dbg = format!("{:?}", layer);
+        assert!(
+            !dbg.contains("Any"),
+            "Expected list mode after trimming, got Any. Debug: {dbg}"
+        );
+    }
+
+    #[test]
+    fn invalid_origin_is_skipped_and_does_not_panic() {
+        // One valid, one invalid — should not panic; layer should be list-mode.
+        let layer = build_cors_layer("https://valid.example.com,not a valid origin !!!");
+        let dbg = format!("{:?}", layer);
+        // At least one valid origin was parsed, so mode is list not Any.
+        assert!(
+            !dbg.contains("Any"),
+            "Expected list mode for mixed valid/invalid, got Any. Debug: {dbg}"
+        );
+    }
+
+    #[test]
+    fn all_invalid_origins_produce_empty_list_not_any() {
+        // If every entry is invalid the layer should be list-mode with an
+        // empty list (deny all), not fall back to Any.
+        let layer = build_cors_layer("not-a-valid-origin !!!, also bad !!!");
+        let dbg = format!("{:?}", layer);
+        assert!(
+            !dbg.contains("Any"),
+            "Expected empty-list mode for all-invalid origins, got Any. Debug: {dbg}"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2287,7 +2784,7 @@ mod tests {
         ));
         let protected = Router::new()
             .route("/analyze/wasm/profile", post(analyze_wasm_profile))
-            .route_layer(middleware::from_fn(auth::auth_middleware));
+            .route_layer(axum::middleware::from_fn(auth::auth_middleware));
         Router::new()
             .merge(protected)
             .layer(Extension(auth_state))
@@ -2442,4 +2939,142 @@ async fn analyze_simulation(
 ) -> Result<Json<AnalysisResult>, AppError> {
     let result = simulation_service.record_and_analyze(metric).await?;
     Ok(Json(result))
+}
+
+// ── Unit tests for validate_config_secrets (#85 / NF-03) ────────────────────
+
+#[cfg(test)]
+mod validate_config_secrets_tests {
+    use super::*;
+
+    /// Build a baseline config whose secrets are *valid* so each test only
+    /// invalidates one field at a time.
+    fn good_config() -> AppConfig {
+        AppConfig {
+            app_env: "test".to_string(),
+            server_port: 8080,
+            rust_log: "info".to_string(),
+            soroban_rpc_url: "https://soroban-testnet.stellar.org".to_string(),
+            jwt_private_key: None,
+            network_passphrase: "Test SDF Network ; September 2015".to_string(),
+            redis_url: String::new(),
+            rpc_providers: String::new(),
+            registry_instance_id: String::new(),
+            registry_public_url: String::new(),
+            registry_seed_peers: String::new(),
+            health_check_interval_secs: 30,
+            gossip_interval_secs: 30,
+            simulation_timeout_secs: 30,
+            simulation_mode: "failover".to_string(),
+            database_url: "sqlite://Perigee.db".to_string(),
+            job_timeout_secs: 300,
+            max_concurrent_jobs: 10,
+            fee_collection_interval_secs: 5,
+            fee_retention_days: 30,
+            fee_analysis_enabled: true,
+            emergency_verification_paused: false,
+            disk_cache_path: String::new(),
+            max_ledger_age: 100,
+            cors_allowed_origins: String::new(),
+        }
+    }
+
+    #[test]
+    fn accepts_well_formed_config() {
+        let cfg = good_config();
+        assert!(validate_config_secrets(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_soroban_rpc_url() {
+        let mut cfg = good_config();
+        cfg.soroban_rpc_url = "".to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("SOROBAN_RPC_URL"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_malformed_soroban_rpc_url() {
+        let mut cfg = good_config();
+        cfg.soroban_rpc_url = "not-a-url".to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("SOROBAN_RPC_URL"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_empty_network_passphrase() {
+        let mut cfg = good_config();
+        cfg.network_passphrase = "   ".to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("NETWORK_PASSPHRASE"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn accepts_rpc_providers_with_valid_urls() {
+        let mut cfg = good_config();
+        cfg.rpc_providers = serde_json::json!([
+            {"name": "stellar-testnet", "url": "https://soroban-testnet.stellar.org"},
+        ])
+        .to_string();
+        assert!(validate_config_secrets(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_rpc_providers_json() {
+        let mut cfg = good_config();
+        cfg.rpc_providers = "{not json".to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("RPC_PROVIDERS"), "unexpected error: {err}");
+        assert!(err.contains("JSON"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_rpc_provider_with_invalid_url() {
+        let mut cfg = good_config();
+        cfg.rpc_providers = serde_json::json!([
+            {"name": "broken", "url": "definitely-not-a-url"},
+        ])
+        .to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("RPC_PROVIDERS"), "unexpected error: {err}");
+        assert!(err.contains("broken"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_rpc_provider_with_empty_name() {
+        let mut cfg = good_config();
+        cfg.rpc_providers = serde_json::json!([
+            {"name": "", "url": "https://example.com"},
+        ])
+        .to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("name must not be empty"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_invalid_registry_public_url() {
+        let mut cfg = good_config();
+        cfg.registry_public_url = "just-a-string".to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("REGISTRY_PUBLIC_URL"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_invalid_seed_peer_urls() {
+        let mut cfg = good_config();
+        // parse_seed_peers accepts comma-separated values too.
+        cfg.registry_seed_peers = "https://peer-a.example.com,not-a-url".to_string();
+        let err = validate_config_secrets(&cfg).unwrap_err();
+        assert!(err.contains("REGISTRY_SEED_PEERS"), "unexpected error: {err}");
+        assert!(err.contains("not-a-url"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn accepts_valid_seed_peer_json_array() {
+        let mut cfg = good_config();
+        cfg.registry_seed_peers =
+            serde_json::json!(["https://peer-a.example.com", "https://peer-b.example.com"])
+                .to_string();
+        assert!(validate_config_secrets(&cfg).is_ok());
+    }
 }

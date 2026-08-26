@@ -2,6 +2,8 @@
 
 import React, { useEffect, useRef } from 'react';
 import mermaid from 'mermaid';
+import { useReducedMotion } from 'framer-motion';
+import { logger } from '../lib/logger';
 
 interface CallGraphVisualizerProps {
   mermaidDefinition: string;
@@ -9,6 +11,7 @@ interface CallGraphVisualizerProps {
 
 export function CallGraphVisualizer({ mermaidDefinition }: CallGraphVisualizerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const reducedMotion = useReducedMotion();
 
   useEffect(() => {
     mermaid.initialize({
@@ -20,8 +23,13 @@ export function CallGraphVisualizer({ mermaidDefinition }: CallGraphVisualizerPr
         htmlLabels: true,
         curve: 'basis',
       },
+      ...(reducedMotion
+        ? {
+            themeCSS: `** { animation: none !important; transition: none !important; }`,
+          }
+        : {}),
     });
-  }, []);
+  }, [reducedMotion]);
 
   useEffect(() => {
     const renderMermaid = async () => {
@@ -31,7 +39,7 @@ export function CallGraphVisualizer({ mermaidDefinition }: CallGraphVisualizerPr
           const { svg } = await mermaid.render('mermaid-graph-' + Date.now(), mermaidDefinition);
           containerRef.current.innerHTML = svg;
         } catch (error) {
-          console.error('Mermaid rendering failed:', error);
+          logger.error('Mermaid rendering failed:', error);
           containerRef.current.innerHTML = `<p style="color: #fb8500;">Failed to render call graph: ${error}</p>`;
         }
       }

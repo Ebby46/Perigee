@@ -2,7 +2,8 @@
 
 import React, { useCallback, useState } from "react";
 import { useDropzone } from "react-dropzone";
-import { motion, AnimatePresence } from "framer-motion";
+import { useTranslations } from "next-intl";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
   Upload,
   FileCode,
@@ -70,6 +71,13 @@ const generateHash = async (file: File): Promise<string> => {
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 };
 
+// Version WASM filenames by appending content hash to invalidate stale caches
+export const getVersionedWasmFilename = (filename: string, hash: string): string => {
+  const version = hash.slice(0, 8);
+  const base = filename.replace(/\.wasm$/i, "");
+  return `${base}.v-${version}.wasm`;
+};
+
 //component
 
 export default function WasmUpload({
@@ -79,8 +87,10 @@ export default function WasmUpload({
   maxFiles = 5,
   className,
 }: WasmUploadProps) {
+  const t = useTranslations();
   const [files, setFiles] = useState<WasmFile[]>([]);
   const [isDragActive, setIsDragActive] = useState(false);
+  const shouldReduceMotion = useReducedMotion();
 
   //validate WASM file
   const validateWasm = useCallback((file: File): string | null => {
@@ -267,11 +277,11 @@ export default function WasmUpload({
 
         <motion.div
           animate={
-            isDragActive
-              ? { y: [0, -8, 0] }
-              : { y: 0 }
+            shouldReduceMotion || !isDragActive
+              ? { y: 0 }
+              : { y: [0, -8, 0] }
           }
-          transition={{ repeat: isDragActive ? Infinity : 0, duration: 1.5 }}
+          transition={{ repeat: shouldReduceMotion || !isDragActive ? 0 : Infinity, duration: shouldReduceMotion ? 0 : 1.5 }}
         >
           <div
             className={cn(
@@ -287,17 +297,17 @@ export default function WasmUpload({
 
         <h3 className="text-lg font-semibold text-slate-800 mb-1">
           {isDragActive
-            ? "Drop your WASM files here"
-            : "Upload Soroban WASM Contracts"}
+            ? t("wasmUpload.dropHere")
+            : t("wasmUpload.uploadContracts")}
         </h3>
         <p className="text-sm text-slate-500 mb-4">
-          Drag & drop <code className="px-1.5 py-0.5 bg-slate-200 rounded text-xs font-mono">.wasm</code> files, or click to browse
+          {t("wasmUpload.dragDrop")}
         </p>
         <div className="flex items-center justify-center gap-2 text-xs text-slate-400">
           <FileCode className="w-4 h-4" />
-          <span>Max {(maxFileSize / 1024 / 1024).toFixed(0)}MB per file</span>
+          <span>{t("wasmUpload.maxPerFile", { size: (maxFileSize / 1024 / 1024).toFixed(0) })}</span>
           <span className="text-slate-300">•</span>
-          <span>Up to {maxFiles} files</span>
+          <span>{t("wasmUpload.upTo", { count: maxFiles })}</span>
         </div>
       </div>
 
@@ -305,9 +315,9 @@ export default function WasmUpload({
       <AnimatePresence>
         {files.length > 0 && (
           <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
+            initial={shouldReduceMotion ? { opacity: 1, y: 0 } : { opacity: 0, y: 20 }}
+            animate={shouldReduceMotion ? { opacity: 1, y: 0 } : { opacity: 1, y: 0 }}
+            exit={shouldReduceMotion ? { opacity: 1, y: 0 } : { opacity: 0, y: -20 }}
             className="mt-6 space-y-3"
           >
             {/* header */}
@@ -331,7 +341,7 @@ export default function WasmUpload({
                 onClick={clearAll}
                 className="text-xs text-slate-400 hover:text-red-500 transition-colors"
               >
-                Clear all
+                {t("wasmUpload.clearAll")}
               </button>
             </div>
 
@@ -339,10 +349,10 @@ export default function WasmUpload({
             {files.map((wasmFile) => (
               <motion.div
                 key={wasmFile.id}
-                layout
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.95 }}
+                layout={!shouldReduceMotion}
+                initial={shouldReduceMotion ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.95 }}
+                animate={shouldReduceMotion ? { opacity: 1, scale: 1 } : { opacity: 1, scale: 1 }}
+                exit={shouldReduceMotion ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.95 }}
                 className={cn(
                   "relative bg-white border rounded-xl p-4 shadow-sm",
                   wasmFile.status === "error"
@@ -396,7 +406,7 @@ export default function WasmUpload({
                             className="h-full bg-indigo-500 rounded-full"
                             initial={{ width: 0 }}
                             animate={{ width: `${wasmFile.progress}%` }}
-                            transition={{ duration: 0.3 }}
+                            transition={{ duration: shouldReduceMotion ? 0 : 0.3 }}
                           />
                         </div>
                         <p className="text-xs text-slate-400 mt-1">
@@ -412,7 +422,7 @@ export default function WasmUpload({
                           {wasmFile.hash.slice(0, 16)}...
                         </code>
                         <span className="text-xs text-emerald-600">
-                          WASM hash ready
+                          {t("wasmUpload.wasmHashReady")}
                         </span>
                       </div>
                     )}
@@ -427,7 +437,7 @@ export default function WasmUpload({
                           onClick={() => retryUpload(wasmFile.id)}
                           className="text-xs text-indigo-600 hover:text-indigo-700 font-medium"
                         >
-                          Retry
+                          {t("wasmUpload.retry")}
                         </button>
                       </div>
                     )}
@@ -462,7 +472,7 @@ export default function WasmUpload({
             {/* analyze all button */}
             {successCount > 0 && (
               <motion.button
-                initial={{ opacity: 0 }}
+                initial={shouldReduceMotion ? { opacity: 1 } : { opacity: 0 }}
                 animate={{ opacity: 1 }}
                 onClick={() => {
                   const completed = files.filter((f) => f.status === "success");
@@ -471,7 +481,7 @@ export default function WasmUpload({
                 className="w-full mt-4 bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 px-4 rounded-xl transition-colors flex items-center justify-center gap-2"
               >
                 <FileCode className="w-5 h-5" />
-                Analyze {successCount} Contract{successCount !== 1 ? "s" : ""}
+                {t("wasmUpload.analyzeContracts", { count: successCount })}
               </motion.button>
             )}
           </motion.div>

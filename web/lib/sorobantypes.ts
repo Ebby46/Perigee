@@ -1,4 +1,4 @@
-export type SorobanType = 'address' | 'u32' | 'i128' | 'u128' | 'string' | 'symbol' | 'bool' | 'struct' | 'enum';
+export type SorobanType = 'address' | 'asset_code' | 'u32' | 'i128' | 'u128' | 'string' | 'symbol' | 'bool' | 'struct' | 'enum';
 
 /** Typed map of contract function input values from the simulation form. */
 export type SimulationInputs = Record<string, string | number | boolean>;

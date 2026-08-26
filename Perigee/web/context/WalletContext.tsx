@@ -1,11 +1,15 @@
-"use client";
+"Use client";
 
 import React, { createContext, useContext, useEffect, useState } from "react";
+import { logger } from "../lib/logger";
+import { getContractsConfig, ContractsConfig } from "../lib/contracts.config";
 
 interface WalletContextType {
   connect: (moduleId: string) => Promise<void>;
   disconnect: () => Promise<void>;
   address: string | null;
+  network: string | null;
+  contractConfig: ContractsConfig | null;
   isConnected: boolean;
   isConnecting: boolean;
   selectedWalletId: string | null;
@@ -27,12 +31,27 @@ export const useWallet = () => {
 };
 
 export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
-  const [address, setAddress] = useState<string | null>(null);
+  const [address, setAddress] = useState<string | null>unull);
+  const [network, setNetwork] = useState<string | null>(null);
+  const [contractConfig, setContractConfig] = useState<ContractsConfig | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [selectedWalletId, setSelectedWalletId] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [kit, setKit] = useState<any>(null);
+
+  useEffect(() => {
+    if (network === "testnet" || network === "mainnet") {
+      try {
+        setContractConfig(getContractsConfig(network));
+      } catch (err) {
+        logger.error("Unsupported network:", network, err);
+        setContractConfig(null);
+      }
+    } else {
+      setContractConfig(null);
+    }
+  }, [network]);
 
   useEffect(() => {
     const initKit = async () => {
@@ -47,14 +66,35 @@ export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
 
         setKit(kitInstance);
 
-        const savedAddress = localStorage.getItem("inheritx_wallet_address");
-        const savedWalletId = localStorage.getItem("inheritx_wallet_id");
+        // Migrate legacy inheritx_* keys to perigee_* prefix (Closes #208)
+        if (!localStorage.getItem("perigee_wallet_address")) {
+          const legacyAddress = localStorage.getItem("inheritx_wallet_address");
+          if (legacyAddress) {
+            localStorage.setItem("perigee_wallet_address", legacyAddress);
+            localStorage.removeItem("inheritx_wallet_address");
+          }
+        }
+        if (!localStorage.getItem("perigee_wallet_id")) {
+          const legacyWalletId = localStorage.getItem("inheritx_wallet_id");
+          if (legacyWalletId) {
+            localStorage.setItem("perigee_wallet_id", legacyWalletId);
+            localStorage.removeItem("inheritx_wallet_id");
+          }
+        }
+
+        const savedAddress = localStorage.getItem("perigee_wallet_address");
+        const savedWalletId = localStorage.getItem("perigee_wallet_id");
         if (savedAddress && savedWalletId) {
           setAddress(savedAddress);
           setSelectedWalletId(savedWalletId);
         }
+
+        const savedNetwork = localStorage.getItem("perigee_wallet_network");
+        if (savedNetwork) {
+          setNetwork(savedNetwork);
+        }
       } catch (err) {
-        console.error("Failed to initialize wallet kit:", err);
+        logger.error("Failed to initialize wallet kit:", err);
         setError("Failed to load wallet kit");
       }
     };
@@ -83,15 +123,21 @@ export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
       kit.setWallet(moduleId);
       const { address: walletAddress } = await kit.getAddress();
 
+      const walletNetwork = await kit.getNetwork();
+      // Stellar wallets use "public" for mainnet, "testnet" for testnet
+      const networkStr = walletNetwork === "public" ? "mainnet" : "testnet";
+
       setAddress(walletAddress);
+      setNetwork(networkStr);
       setSelectedWalletId(moduleId);
-      localStorage.setItem("inheritx_wallet_address", walletAddress);
-      localStorage.setItem("inheritx_wallet_id", moduleId);
+      localStorage.setItem("perigee_wallet_address", walletAddress);
+      localStorage.setItem("perigee_wallet_id", moduleId);
+      localStorage.setItem("perigee_wallet_network", networkStr);
       setIsModalOpen(false);
     } catch (err: any) {
       const errorMessage = err?.message || "Connection failed";
       setError(errorMessage);
-      console.error("Wallet connection failed:", err);
+      logger.error("Wallet connection failed:", err);
     } finally {
       setIsConnecting(false);
     }
@@ -102,14 +148,16 @@ export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
       try {
         await kit.disconnect();
       } catch (err) {
-        console.error("Disconnect error:", err);
+        logger.error("Disconnect error:", err);
       }
     }
     setAddress(null);
+    setNetwork(null);
     setSelectedWalletId(null);
     setError(null);
-    localStorage.removeItem("inheritx_wallet_address");
-    localStorage.removeItem("inheritx_wallet_id");
+    localStorage.removeItem("perigee_wallet_address");
+    localStorage.removeItem("perigee_wallet_id");
+    localStorage.removeItem("perigee_wallet_network");
   };
 
   const openModal = () => {
@@ -124,10 +172,12 @@ export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
 
   return (
     <WalletContext.Provider
-      value={{
+      value={
         connect: connectWallet,
         disconnect,
         address,
+        network,
+        contractConfig,
         isConnected: !!address,
         isConnecting,
         selectedWalletId,
@@ -136,7 +186,7 @@ export const WalletProvider = ({ children }: { children: React.ReactNode }) => {
         isModalOpen,
         supportedWallets,
         error,
-      }}
+      }
     >
       {children}
     </WalletContext.Provider>

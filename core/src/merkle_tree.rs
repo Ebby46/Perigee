@@ -123,7 +123,6 @@ impl MerkleTree {
 
         for level in 0..self.nodes.len() - 1 {
             let level_nodes = &self.nodes[level];
-            let sibling_index = if path_index.is_multiple_of(2) {
             let is_left = path_index.is_multiple_of(2);
             let sibling_index = if is_left {
                 path_index + 1
@@ -139,7 +138,6 @@ impl MerkleTree {
 
             proof.push(ProofNode {
                 hash: sibling_hash,
-                is_left: path_index.is_multiple_of(2),
                 is_left,
             });
 
@@ -179,6 +177,15 @@ impl MerkleTree {
         hex::encode(self.root)
     }
 
+    /// Return the root hash, or None if the tree has not been built.
+    pub fn root_hash(&self) -> Option<[u8; 32]> {
+        if self.leaf_count == 0 {
+            None
+        } else {
+            Some(self.root)
+        }
+    }
+
     /// Return the number of leaves in the tree.
     pub fn leaf_count(&self) -> usize {
         self.leaf_count
@@ -197,14 +204,17 @@ impl MerkleTree {
         Ok(tree)
     }
 
+    /// Hash one leaf.
+    ///
+    /// A single SHA-256, matching this module's documented contract, the
+    /// single-hash `hash_pair` below, and the five reference-vector tests.
+    /// This had drifted to a double SHA-256 (`SHA256(SHA256(data))`), which
+    /// changed every root the tree produced: for the leaf "solo" it yielded
+    /// 0018e0e3… where the documented scheme gives 5364f2f2….
     fn hash_leaf(data: &[u8]) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(data);
-        let digest1 = hasher.finalize();
-        let mut hasher2 = Sha256::new();
-        hasher2.update(digest1);
-        let digest2 = hasher2.finalize();
-        digest2.into()
+        hasher.finalize().into()
     }
 
     fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
@@ -610,4 +620,5 @@ mod fuzz_tests {
             }
         }
     }
+}
 }

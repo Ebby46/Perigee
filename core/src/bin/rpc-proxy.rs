@@ -79,7 +79,10 @@ async fn main() {
         config: Config::default(),
     });
 
-    let app = Router::new().route("/", post(handle_rpc)).with_state(state);
+    let app = Router::new()
+        .route("/", post(handle_rpc))
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 2)) // 2 MB limit
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", args.port))
         .await

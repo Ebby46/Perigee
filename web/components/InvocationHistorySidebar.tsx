@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { ChevronLeft, ChevronRight, Clock, CheckCircle, XCircle, Trash2 } from 'lucide-react';
+import { useTranslations } from 'next-intl';
 import { useInvocationHistory } from './InnovocationHistory';
 import type { InvocationResult } from '../lib/sorobantypes';
 
@@ -13,19 +14,20 @@ function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function formatDate(timestamp: number): string {
+function formatDate(timestamp: number, t: (key: string) => string): string {
   const date = new Date(timestamp);
   const today = new Date();
-  if (date.toDateString() === today.toDateString()) return 'Today';
+  if (date.toDateString() === today.toDateString()) return t("history.today");
   const yesterday = new Date(today);
   yesterday.setDate(today.getDate() - 1);
-  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  if (date.toDateString() === yesterday.toDateString()) return t("history.yesterday");
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
 export function InvocationHistorySidebar({ onSelectResult }: InvocationHistorySidebarProps) {
   const [isOpen, setIsOpen] = useState(true);
   const { history, clearHistory } = useInvocationHistory();
+  const t = useTranslations();
 
   return (
     <div style={{ position: 'relative', display: 'flex', alignItems: 'flex-start' }}>
@@ -81,7 +83,7 @@ export function InvocationHistorySidebar({ onSelectResult }: InvocationHistorySi
             <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
               <Clock size={13} color="#8b949e" />
               <span style={{ fontSize: '13px', fontWeight: '600', color: '#c9d1d9' }}>
-                History
+                {t("history.title")}
               </span>
               {history.length > 0 && (
                 <span
@@ -102,7 +104,7 @@ export function InvocationHistorySidebar({ onSelectResult }: InvocationHistorySi
             {history.length > 0 && (
               <button
                 onClick={clearHistory}
-                title="Clear all history"
+                title={t("history.clearAll")}
                 style={{
                   background: 'none',
                   border: 'none',
@@ -133,11 +135,11 @@ export function InvocationHistorySidebar({ onSelectResult }: InvocationHistorySi
                 }}
               >
                 <Clock size={22} color="#30363d" style={{ margin: '0 auto 10px', display: 'block' }} />
-                No analyses yet
+                {t("history.noAnalyses")}
               </div>
             ) : (
               history.map((item, index) => {
-                const report = item.analysisReport ?? (item as any).resourceCost;
+                const report = item.analysisReport ?? item.resourceCost;
 
                 return (
                   <button
@@ -182,7 +184,7 @@ export function InvocationHistorySidebar({ onSelectResult }: InvocationHistorySi
                         </p>
 
                         <p style={{ margin: '0', fontSize: '11px', color: '#8b949e' }}>
-                          {formatDate(item.timestamp)} · {formatTime(item.timestamp)}
+                          {formatDate(item.timestamp, t)} · {formatTime(item.timestamp)}
                         </p>
 
                         {report && item.success && (
