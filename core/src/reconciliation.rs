@@ -1,5 +1,19 @@
 #![allow(dead_code)]
 
+//! Fee reconciliation engine.
+//!
+//! **Precision model:** Fee percentages (`delta_pct`, `mean_delta_pct`, etc.)
+//! are stored as `f64` for API compatibility. Internal calculations use
+//! integer arithmetic where possible (`i64` for fee amounts in stroops).
+//! When converting between integer stroop amounts and percentage values,
+//! rounding is performed to 4 decimal places to avoid floating-point drift
+//! in reconciliation summaries.
+//!
+//! Known limitation: `Discrepancy::delta_pct` uses `f64`, which may lose
+//! precision for very small fee differences. For high-precision use cases,
+//! consider migrating to fixed-point arithmetic (e.g. `i128` with 18 decimal
+//! places) in a future iteration.
+
 use crate::db;
 use crate::fee_analytics::FeeAnalyticsEngine;
 use crate::fee_store::FeeStore;

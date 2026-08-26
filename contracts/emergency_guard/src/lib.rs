@@ -309,7 +309,7 @@ impl EmergencyGuard {
         state.set_paused(operation, paused);
         env.storage()
             .instance()
-            .set(&GuardDataKey::PauseState, &pause_state);
+            .set(&GuardDataKey::PauseState, &state);
 
         emit_guard_event(
             &env,
@@ -329,7 +329,6 @@ impl EmergencyGuard {
             operation,
             paused
         );
-            .set(&GuardDataKey::PauseState, &state);
         emit_pause_state_changed(&env, &admin, operation, paused);
         Ok(())
     }
@@ -341,7 +340,7 @@ impl EmergencyGuard {
         state.pause_all();
         env.storage()
             .instance()
-            .set(&GuardDataKey::PauseState, &pause_state);
+            .set(&GuardDataKey::PauseState, &state);
 
         emit_guard_event(
             &env,
@@ -355,7 +354,6 @@ impl EmergencyGuard {
                 approver_count: approvers.len(),
             },
         );
-            .set(&GuardDataKey::PauseState, &state);
         emit_emergency_paused_all(&env, &approvers);
         Ok(())
     }
@@ -365,7 +363,7 @@ impl EmergencyGuard {
         Self::check_multi_sig(&env, &approvers)?;
         env.storage()
             .instance()
-            .set(&GuardDataKey::PauseState, &pause_state);
+            .set(&GuardDataKey::PauseState, &PauseType::new(0));
 
         emit_guard_event(
             &env,
@@ -379,7 +377,6 @@ impl EmergencyGuard {
                 approver_count: approvers.len(),
             },
         );
-            .set(&GuardDataKey::PauseState, &PauseType::new(0));
         emit_resumed_all(&env, &approvers);
         Ok(())
     }

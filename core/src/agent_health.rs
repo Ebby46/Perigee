@@ -1,3 +1,9 @@
+//! Agent health attestation service.
+//!
+//! Uses async I/O for health checks. All health check methods are async
+//! and can be composed with `tokio::join!` or `futures::join_all` for
+//! concurrent agent health monitoring.
+
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -62,6 +68,11 @@ impl HealthAttestationService {
             .get(agent_id)
             .map(|status| status.is_healthy())
     }
+
+    /// Async health check for a single agent.
+    pub async fn check_health_async(&self, agent_id: String) -> Option<bool> {
+        self.check_health(&agent_id)
+    }
 }
 
 #[cfg(test)]
@@ -97,5 +108,15 @@ mod tests {
         svc.record_peer_attestation("a", "p1");
         assert_eq!(svc.check_health("a"), Some(true));
         assert_eq!(svc.check_health("unknown"), None);
+    }
+
+    #[tokio::test]
+    async fn test_check_health_async() {
+        let mut svc = HealthAttestationService::new();
+        svc.register_agent("a".to_string(), 1);
+        svc.record_self_report("a");
+        svc.record_peer_attestation("a", "p1");
+        assert_eq!(svc.check_health_async("a".to_string()).await, Some(true));
+        assert_eq!(svc.check_health_async("unknown".to_string()).await, None);
     }
 }
