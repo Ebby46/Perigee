@@ -129,20 +129,29 @@ impl VaultStore {
             .map_err(VaultStoreError::Database)
     }
 
-    pub async fn list_by_manager(&self, manager_id: &str) -> Result<Vec<VaultRecord>, VaultStoreError> {
-        sqlx::query_as::<_, VaultRecord>(
-            r#"
-            SELECT id, manager_id, name, status, config_json, version,
-                   idempotency_key, created_at, updated_at
-            FROM vaults
-            WHERE manager_id = ?1
-            ORDER BY created_at DESC
-            "#,
-        )
-        .bind(manager_id)
-        .fetch_all(self.vaults.pool())
-        .await
-        .map_err(VaultStoreError::Database)
+    pub async fn list_by_manager(
+        &self,
+        manager_id: &str,
+        pagination: &crate::db::models::PaginationParams,
+    ) -> Result<crate::db::models::PagedResponse<VaultRecord>, VaultStoreError> {
+        let (limit, offset) = pagination.to_limit_offset();
+        let (data, total_count) = self
+            .vaults
+            .list_by_manager_paginated(manager_id, limit, offset)
+            .await
+            .map_err(VaultStoreError::Database)?;
+
+        let page = pagination.page.max(1);
+        let page_size = pagination.page_size.clamp(1, crate::db::models::PaginationParams::MAX_PAGE_SIZE);
+        let has_more = offset + limit < total_count;
+
+        Ok(crate::db::models::PagedResponse {
+            data,
+            total_count,
+            page,
+            page_size,
+            has_more,
+        })
     }
 
     pub async fn get(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
@@ -234,9 +243,16 @@ async fn verify_ownership(
     Ok(())
 }
 
+fn list_vaults_default_page() -> u32 { 1 }
+fn list_vaults_default_page_size() -> u32 { 50 }
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ListVaultsQuery {
     pub manager_id: String,
+    #[serde(default = "list_vaults_default_page")]
+    pub page: u32,
+    #[serde(default = "list_vaults_default_page_size")]
+    pub page_size: u32,
 }
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
@@ -245,10 +261,12 @@ pub struct ListVaultsQuery {
     get,
     path = "/vaults",
     params(
-        ("manager_id" = String, Query, description = "Manager ID to list vaults for")
+        ("manager_id" = String, Query, description = "Manager ID to list vaults for"),
+        ("page" = Option<u32>, Query, description = "Page number (1-indexed, default 1)"),
+        ("page_size" = Option<u32>, Query, description = "Records per page (default 50, max 200)")
     ),
     responses(
-        (status = 200, description = "List of vaults for the manager", body = Vec<VaultRecord>),
+        (status = 200, description = "Paginated list of vaults for the manager", body = PagedResponse<VaultRecord>),
         (status = 401, description = "Unauthorized")
     ),
     tag = "Vaults"
@@ -257,10 +275,17 @@ pub async fn list_vaults_handler(
     State(state): State<Arc<crate::AppState>>,
     Extension(user): Extension<AuthenticatedUser>,
     Query(query): Query<ListVaultsQuery>,
-) -> Result<Json<Vec<VaultRecord>>, AppError> {
+) -> Result<Json<crate::db::models::PagedResponse<VaultRecord>>, AppError> {
     verify_ownership(&state, &user, &query.manager_id).await?;
-    let vaults = state.vault_store.list_by_manager(&query.manager_id).await?;
-    Ok(Json(vaults))
+    let pagination = crate::db::models::PaginationParams {
+        page: query.page,
+        page_size: query.page_size,
+    };
+    let result = state
+        .vault_store
+        .list_by_manager(&query.manager_id, &pagination)
+        .await?;
+    Ok(Json(result))
 }
 
 #[utoipa::path(
@@ -775,5 +800,92 @@ mod tests {
 
         let app_err: AppError = err.into();
         assert!(matches!(app_err, AppError::BadRequest(_)));
+    }
+
+    // ── BE-027: pagination ────────────────────────────────────────────────────
+
+    fn pagination(page: u32, page_size: u32) -> crate::db::models::PaginationParams {
+        crate::db::models::PaginationParams { page, page_size }
+    }
+
+    #[tokio::test]
+    async fn list_by_manager_paginated_basic() {
+        let store = test_store().await;
+
+        for i in 0..5u32 {
+            store
+                .create(&CreateVaultRequest {
+                    manager_id: "mgr-pg".into(),
+                    name: format!("Vault {i}"),
+                    status: "active".into(),
+                    config_json: "{}".into(),
+                    idempotency_key: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let page1 = store.list_by_manager("mgr-pg", &pagination(1, 2)).await.unwrap();
+        assert_eq!(page1.data.len(), 2);
+        assert_eq!(page1.total_count, 5);
+        assert_eq!(page1.page, 1);
+        assert_eq!(page1.page_size, 2);
+        assert!(page1.has_more);
+
+        let page2 = store.list_by_manager("mgr-pg", &pagination(2, 2)).await.unwrap();
+        assert_eq!(page2.data.len(), 2);
+        assert!(page2.has_more);
+
+        let page3 = store.list_by_manager("mgr-pg", &pagination(3, 2)).await.unwrap();
+        assert_eq!(page3.data.len(), 1);
+        assert!(!page3.has_more);
+    }
+
+    #[tokio::test]
+    async fn list_by_manager_paginated_empty_for_unknown_manager() {
+        let store = test_store().await;
+        let result = store.list_by_manager("unknown-mgr", &pagination(1, 50)).await.unwrap();
+        assert!(result.data.is_empty());
+        assert_eq!(result.total_count, 0);
+        assert!(!result.has_more);
+    }
+
+    #[tokio::test]
+    async fn list_by_manager_page_size_clamped_to_max() {
+        let store = test_store().await;
+        store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-clamp".into(),
+                name: "Vault".into(),
+                status: "active".into(),
+                config_json: "{}".into(),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        let result = store.list_by_manager("mgr-clamp", &pagination(1, 9999)).await.unwrap();
+        assert_eq!(result.page_size, 200);
+        assert_eq!(result.total_count, 1);
+    }
+
+    #[tokio::test]
+    async fn list_by_manager_beyond_last_page_returns_empty() {
+        let store = test_store().await;
+        store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-eof".into(),
+                name: "Vault".into(),
+                status: "active".into(),
+                config_json: "{}".into(),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        let result = store.list_by_manager("mgr-eof", &pagination(10, 50)).await.unwrap();
+        assert!(result.data.is_empty());
+        assert_eq!(result.total_count, 1);
+        assert!(!result.has_more);
     }
 }
