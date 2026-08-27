@@ -36,7 +36,7 @@ mod ws;
 
 use crate::cache::{ContractCache, SimulationCache};
 use crate::comparison::{CompareMode, RegressionFlag, RegressionReport, ResourceDelta};
-use crate::errors::AppError;
+use crate::errors::{AppError, Validate, ValidatedJson};
 use axum::{
     extract::{Json, Multipart, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
@@ -578,6 +578,18 @@ pub struct AnalyzeRequest {
     pub include_merkle_tree: Option<bool>,
 }
 
+impl Validate for AnalyzeRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.contract_id.trim().is_empty() {
+            return Err("contract_id must be a non-empty string".to_string());
+        }
+        if self.function_name.trim().is_empty() {
+            return Err("function_name must be a non-empty string".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct ResourceReport {
     /// CPU instructions consumed
@@ -695,6 +707,18 @@ pub struct OptimizeLimitsRequest {
     pub    safety_margin: f64,
 }
 
+impl Validate for OptimizeLimitsRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.contract_id.trim().is_empty() {
+            return Err("contract_id must be a non-empty string".to_string());
+        }
+        if self.function_name.trim().is_empty() {
+            return Err("function_name must be a non-empty string".to_string());
+        }
+        Ok(())
+    }
+}
+
 fn default_safety_margin() -> f64 {
     0.05
 }
@@ -787,6 +811,18 @@ pub struct AnalyzeWasmRequest {
     pub enable_experimental: Option<bool>,
 }
 
+impl Validate for AnalyzeWasmRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.wasm_bytes.trim().is_empty() {
+            return Err("wasm_bytes must be a non-empty string".to_string());
+        }
+        if self.function_name.trim().is_empty() {
+            return Err("function_name must be a non-empty string".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// Request body for the WASM profiling endpoint.
 #[derive(Debug, Deserialize)]
 pub struct ProfileWasmRequest {
@@ -797,6 +833,18 @@ pub struct ProfileWasmRequest {
     /// Optional function arguments.
     #[serde(default)]
     pub args: Vec<String>,
+}
+
+impl Validate for ProfileWasmRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.wasm_bytes.trim().is_empty() {
+            return Err("wasm_bytes must be a non-empty string".to_string());
+        }
+        if self.function_name.trim().is_empty() {
+            return Err("function_name must be a non-empty string".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// Response body for the WASM profiling endpoint.
@@ -821,6 +869,18 @@ pub struct AnalyzeWasmBranchesRequest {
     /// Additional permutations are generated automatically.
     #[schema(example = "[]")]
     pub args: Option<Vec<String>>,
+}
+
+impl Validate for AnalyzeWasmBranchesRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.wasm_bytes.trim().is_empty() {
+            return Err("wasm_bytes must be a non-empty string".to_string());
+        }
+        if self.function_name.trim().is_empty() {
+            return Err("function_name must be a non-empty string".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// API response for the WASM execution-branch analysis endpoint.
@@ -946,7 +1006,7 @@ fn to_report(
 )]
 async fn analyze(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<AnalyzeRequest>,
+    ValidatedJson(payload): ValidatedJson<AnalyzeRequest>,
 ) -> Result<(HeaderMap, Json<ResourceReport>), AppError> {
     // Create a tracing span with structured fields for this request
     let span = tracing::info_span!(
@@ -1111,7 +1171,7 @@ async fn analyze(
 )]
 async fn analyze_wasm(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<AnalyzeWasmRequest>,
+    ValidatedJson(payload): ValidatedJson<AnalyzeWasmRequest>,
 ) -> Result<Json<ResourceReport>, AppError> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
@@ -1208,7 +1268,7 @@ async fn metrics_handler(
 
 async fn analyze_wasm_profile(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<ProfileWasmRequest>,
+    ValidatedJson(payload): ValidatedJson<ProfileWasmRequest>,
 ) -> Result<Json<ProfileResponse>, AppError> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
@@ -1264,7 +1324,7 @@ async fn analyze_wasm_profile(
 )]
 async fn analyze_wasm_branches(
     State(_state): State<Arc<AppState>>,
-    Json(payload): Json<AnalyzeWasmBranchesRequest>,
+    ValidatedJson(payload): ValidatedJson<AnalyzeWasmBranchesRequest>,
 ) -> Result<Json<WasmBranchAnalysisResponse>, AppError> {
     use crate::wasm_branch_analysis::analyze_wasm_branches as run_analysis;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -1324,7 +1384,7 @@ async fn analyze_wasm_branches(
 )]
 async fn optimize_limits(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<OptimizeLimitsRequest>,
+    ValidatedJson(payload): ValidatedJson<OptimizeLimitsRequest>,
 ) -> Result<Json<OptimizeLimitsResponse>, AppError> {
     tracing::info!(
         "Optimizing limits for contract: {}, function: {}",
@@ -1546,6 +1606,18 @@ pub struct GasGolfingRequest {
     pub contract_name: String,
 }
 
+impl Validate for GasGolfingRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.wasm_bytes.trim().is_empty() {
+            return Err("wasm_bytes must be a non-empty string".to_string());
+        }
+        if self.contract_name.trim().is_empty() {
+            return Err("contract_name must be a non-empty string".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct GasGolfingResponse {
     pub report: GasGolfingReport,
@@ -1566,7 +1638,7 @@ pub struct GasGolfingResponse {
 )]
 async fn analyze_gas_golfing(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<GasGolfingRequest>,
+    ValidatedJson(payload): ValidatedJson<GasGolfingRequest>,
 ) -> Result<Json<GasGolfingResponse>, AppError> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
@@ -2451,6 +2523,9 @@ async fn main() {
         .fallback(not_found_handler)
         .layer(Extension(auth_state))
         .layer(cors)
+        .layer(axum::middleware::from_fn(
+            crate::middleware::method_not_allowed_middleware,
+        ))
         .layer(axum::middleware::from_fn(
             crate::middleware::correlation_id_middleware,
         ))

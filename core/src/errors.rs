@@ -1,9 +1,11 @@
 use axum::{
+    async_trait,
+    extract::{rejection::JsonRejection, FromRequest, Request},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 use std::env;
 use thiserror::Error;
 use utoipa::ToSchema;
@@ -249,6 +251,78 @@ impl From<SimulationError> for AppError {
     }
 }
 
+// ── Validate trait ────────────────────────────────────────────────────────────
+
+/// Field-level validation for request structs.
+///
+/// Implement this on every request DTO that needs field presence / format
+/// checks beyond what `serde` provides.  The [`ValidatedJson`] extractor
+/// calls this after successful JSON deserialisation and converts any error
+/// into a `400 Bad Request` response using the standard [`ErrorResponse`]
+/// envelope.
+pub trait Validate {
+    /// Return an error message describing the first validation failure, or
+    /// `Ok(())` when all fields are valid.
+    fn validate(&self) -> Result<(), String>;
+}
+
+// ── ValidatedJson extractor ───────────────────────────────────────────────────
+
+/// Drop-in replacement for `axum::extract::Json` that normalises **all**
+/// error cases — bad JSON syntax, wrong types, and field-level validation
+/// failures — into the same `{ error, message }` response envelope used by
+/// [`AppError`].
+///
+/// # Usage
+/// ```ignore
+/// async fn my_handler(
+///     State(state): State<Arc<AppState>>,
+///     ValidatedJson(payload): ValidatedJson<MyRequest>,
+/// ) -> Result<Json<MyResponse>, AppError> { … }
+/// ```
+///
+/// where `MyRequest: serde::de::DeserializeOwned + Validate + Send + 'static`.
+pub struct ValidatedJson<T>(pub T);
+
+#[async_trait]
+impl<T, S> FromRequest<S> for ValidatedJson<T>
+where
+    T: DeserializeOwned + Validate,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => {
+                // JSON parsed successfully — now run field-level validation.
+                value.validate().map_err(AppError::BadRequest)?;
+                Ok(ValidatedJson(value))
+            }
+            Err(rejection) => {
+                // Map every Axum JSON rejection variant to a 400 with a
+                // human-readable message inside the standard envelope.
+                let message = match &rejection {
+                    JsonRejection::JsonDataError(e) => {
+                        format!("Invalid JSON data: {}", e.body_text())
+                    }
+                    JsonRejection::JsonSyntaxError(e) => {
+                        format!("JSON syntax error: {}", e.body_text())
+                    }
+                    JsonRejection::MissingJsonContentType(_) => {
+                        "Content-Type must be application/json".to_string()
+                    }
+                    JsonRejection::BytesRejection(_) => {
+                        "Failed to read request body".to_string()
+                    }
+                    _ => "Invalid request body".to_string(),
+                };
+                Err(AppError::BadRequest(message))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +404,143 @@ mod tests {
             let msg = err.client_message();
             assert!(msg.contains("contract ABC not deployed"));
         });
+    }
+}
+
+#[cfg(test)]
+mod validated_json_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{header, Method, Request, StatusCode},
+        routing::post,
+        Router,
+    };
+    use tower::ServiceExt;
+
+    // ── Minimal request structs for testing ──────────────────────────────────
+
+    #[derive(serde::Deserialize)]
+    struct SimpleRequest {
+        name: String,
+    }
+
+    impl Validate for SimpleRequest {
+        fn validate(&self) -> Result<(), String> {
+            if self.name.trim().is_empty() {
+                return Err("name must be a non-empty string".to_string());
+            }
+            Ok(())
+        }
+    }
+
+    async fn test_handler(
+        ValidatedJson(payload): ValidatedJson<SimpleRequest>,
+    ) -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({ "name": payload.name }))
+    }
+
+    fn test_app() -> Router {
+        Router::new().route("/test", post(test_handler))
+    }
+
+    /// Sends a POST to /test, returns (status, body_text).
+    async fn send(body: &str, content_type: &str) -> (StatusCode, String) {
+        let app = test_app();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/test")
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(body.to_owned()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn valid_request_passes_through() {
+        let (status, body) = send(r#"{"name":"alice"}"#, "application/json").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("alice"));
+    }
+
+    #[tokio::test]
+    async fn malformed_json_returns_400_envelope() {
+        let (status, body) = send("{not valid json}", "application/json").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {}", body);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("response must be JSON");
+        assert_eq!(v["error"], "BAD_REQUEST");
+        assert!(
+            v["message"].as_str().unwrap_or("").len() > 0,
+            "message must not be empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_content_type_returns_400_envelope() {
+        let (status, body) = send(r#"{"name":"alice"}"#, "text/plain").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {}", body);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("response must be JSON");
+        assert_eq!(v["error"], "BAD_REQUEST");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("application/json"),
+            "message should mention content-type requirement: {}",
+            v["message"]
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_field_type_returns_400_envelope() {
+        // `name` must be a string, sending a number should fail deserialization.
+        let (status, body) = send(r#"{"name":42}"#, "application/json").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {}", body);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("response must be JSON");
+        assert_eq!(v["error"], "BAD_REQUEST");
+    }
+
+    #[tokio::test]
+    async fn field_validation_empty_string_returns_400() {
+        let (status, body) = send(r#"{"name":"   "}"#, "application/json").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {}", body);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("response must be JSON");
+        assert_eq!(v["error"], "BAD_REQUEST");
+        assert!(
+            v["message"].as_str().unwrap_or("").contains("name"),
+            "message should name the failing field: {}",
+            v["message"]
+        );
+    }
+
+    // ── Validate trait unit tests (no HTTP layer needed) ──────────────────────
+
+    #[test]
+    fn validate_rejects_empty_name() {
+        let req = SimpleRequest {
+            name: "".to_string(),
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_whitespace_only_name() {
+        let req = SimpleRequest {
+            name: "   ".to_string(),
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_non_empty_name() {
+        let req = SimpleRequest {
+            name: "alice".to_string(),
+        };
+        assert!(req.validate().is_ok());
     }
 }
