@@ -2334,6 +2334,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "oracle-aggregator"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "ordered-multimap"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
