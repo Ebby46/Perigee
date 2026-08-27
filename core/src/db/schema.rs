@@ -91,6 +91,53 @@ impl ManagersTable {
         }
     }
 
+    /// Paginated variant: returns a page of records plus the total count
+    /// matching the optional status filter.
+    pub async fn list_paginated(
+        &self,
+        status_filter: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<crate::db::models::ManagerRecord>, i64), sqlx::Error> {
+        let (rows, total) = if let Some(status) = status_filter {
+            let rows = sqlx::query_as::<_, crate::db::models::ManagerRecord>(
+                "SELECT id, stellar_address, name, email, status, kyc_document_ref, notes, created_at, updated_at \
+                 FROM managers WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
+            )
+            .bind(status)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&*self.pool)
+            .await?;
+
+            let (count,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM managers WHERE status = ?1",
+            )
+            .bind(status)
+            .fetch_one(&*self.pool)
+            .await?;
+
+            (rows, count)
+        } else {
+            let rows = sqlx::query_as::<_, crate::db::models::ManagerRecord>(
+                "SELECT id, stellar_address, name, email, status, kyc_document_ref, notes, created_at, updated_at \
+                 FROM managers ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+            )
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&*self.pool)
+            .await?;
+
+            let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM managers")
+                .fetch_one(&*self.pool)
+                .await?;
+
+            (rows, count)
+        };
+
+        Ok((rows, total))
+    }
+
     pub async fn insert(
         &self,
         id: &str,
@@ -197,6 +244,33 @@ impl VaultsTable {
         .await?;
 
         self.find_by_id(id).await?.ok_or(sqlx::Error::RowNotFound)
+    }
+
+    /// Paginated list of vaults for a given manager, ordered newest-first.
+    /// Returns `(rows, total_count)`.
+    pub async fn list_by_manager_paginated(
+        &self,
+        manager_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<crate::db::models::VaultRecord>, i64), sqlx::Error> {
+        let rows = sqlx::query_as::<_, crate::db::models::VaultRecord>(
+            "SELECT id, manager_id, name, status, config_json, version, idempotency_key, created_at, updated_at \
+             FROM vaults WHERE manager_id = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
+        )
+        .bind(manager_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&*self.pool)
+        .await?;
+
+        let (total,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
+                .bind(manager_id)
+                .fetch_one(&*self.pool)
+                .await?;
+
+        Ok((rows, total))
     }
 
     pub async fn update(
