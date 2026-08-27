@@ -251,6 +251,12 @@ impl From<SimulationError> for AppError {
     }
 }
 
+impl From<crate::parser::ParserError> for AppError {
+    fn from(err: crate::parser::ParserError) -> Self {
+        AppError::BadRequest(err.to_string())
+    }
+}
+
 // ── Validate trait ────────────────────────────────────────────────────────────
 
 /// Field-level validation for request structs.
@@ -542,5 +548,18 @@ mod validated_json_tests {
             name: "alice".to_string(),
         };
         assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn parser_error_converts_to_bad_request() {
+        use crate::parser::ParserError;
+        let err = ParserError::InvalidXdr {
+            location: "$".to_string(),
+            details: "Invalid base64 encoding: invalid symbol".to_string(),
+        };
+        let app_err: AppError = err.into();
+        assert_eq!(app_err.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(app_err.error_type(), "BAD_REQUEST");
+        assert!(app_err.client_message().contains("Invalid XDR at $"));
     }
 }
