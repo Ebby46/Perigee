@@ -1,7 +1,4 @@
-"use client";
-
-import { useRouter } from "next/router";
-import { useEffect, useState } from "react";
+import type { GetServerSideProps } from "next";
 import Link from "next/link";
 import { SEO } from "../../components/SEO";
 import { Vault } from "../../types/vault";
@@ -11,27 +8,36 @@ import {
   fetchVaultData,
 } from "../../lib/vault-metadata";
 
-export default function PagesVaultDetailPage() {
-  const router = useRouter();
-  const { id } = router.query;
-  const vaultId = typeof id === "string" ? id : Array.isArray(id) ? id[0] : "";
-  const [vault, setVault] = useState<Vault | null>(null);
-  const [loading, setLoading] = useState(true);
+interface VaultDetailPageProps {
+  vaultId: string;
+  vault: Vault | null;
+}
 
-  useEffect(() => {
-    if (!vaultId) return;
-    let mounted = true;
-    fetchVaultData(vaultId).then((data) => {
-      if (mounted) {
-        setVault(data);
-        setLoading(false);
-      }
-    });
-    return () => {
-      mounted = false;
-    };
-  }, [vaultId]);
+/**
+ * WEB-55 (#188): the vault ID is read from the URL path via `context.params`
+ * instead of `router.query`, so it is stable on first render and cannot
+ * desync during client-side navigation. Vault data is fetched server-side
+ * and hydrated into the page through props.
+ */
+export const getServerSideProps: GetServerSideProps<VaultDetailPageProps> = async (
+  context,
+) => {
+  const rawId = context.params?.id;
+  const vaultId = Array.isArray(rawId) ? rawId[0] : rawId ?? "";
+  const vault = vaultId ? await fetchVaultData(vaultId) : null;
 
+  return {
+    props: {
+      vaultId,
+      vault,
+    },
+  };
+};
+
+export default function PagesVaultDetailPage({
+  vaultId,
+  vault,
+}: VaultDetailPageProps) {
   const jsonLd = vault ? buildVaultJsonLd(vault, vaultId) : undefined;
   const customOg = vault ? buildVaultOgTags(vault, vaultId) : undefined;
   const title = vault ? `${vault.name} | Perigee` : "Vault Details";
@@ -70,9 +76,7 @@ export default function PagesVaultDetailPage() {
         </header>
 
         <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
-          {loading ? (
-            <div className="py-12 text-center text-slate-500">Loading vault...</div>
-          ) : !vault ? (
+          {!vault ? (
             <div className="py-12 text-center text-slate-400">Vault not found.</div>
           ) : (
             <>
