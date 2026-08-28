@@ -5,8 +5,8 @@
 //! otherwise the caller gets a conflict and must reload.
 
 use crate::auth::AuthenticatedUser;
-use crate::errors::AppError;
 use crate::db;
+use crate::errors::AppError;
 use axum::{
     extract::{Extension, Path, Query, State},
     Json,
@@ -124,7 +124,15 @@ impl VaultStore {
         let config_json = req.config_json.trim();
 
         self.vaults
-            .insert(&id, manager_id, name, status, config_json, idempotency_key, now)
+            .insert(
+                &id,
+                manager_id,
+                name,
+                status,
+                config_json,
+                idempotency_key,
+                now,
+            )
             .await
             .map_err(VaultStoreError::Database)
     }
@@ -142,7 +150,9 @@ impl VaultStore {
             .map_err(VaultStoreError::Database)?;
 
         let page = pagination.page.max(1);
-        let page_size = pagination.page_size.clamp(1, crate::db::models::PaginationParams::MAX_PAGE_SIZE);
+        let page_size = pagination
+            .page_size
+            .clamp(1, crate::db::models::PaginationParams::MAX_PAGE_SIZE);
         let has_more = offset + limit < total_count;
 
         Ok(crate::db::models::PagedResponse {
@@ -173,13 +183,15 @@ impl VaultStore {
         req: &UpdateVaultRequest,
     ) -> Result<VaultRecord, VaultStoreError> {
         if req.version < 1 {
-            return Err(VaultStoreError::InvalidData(
-                "version must be >= 1".into(),
-            ));
+            return Err(VaultStoreError::InvalidData("version must be >= 1".into()));
         }
 
         let name = req.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let status = req.status.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let status = req
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let config_json = req.config_json.as_deref();
         let now = Utc::now();
 
@@ -221,6 +233,47 @@ impl VaultStore {
     }
 }
 
+/// Fetch a vault regardless of deletion state. Used by the admin restore
+/// path and by the delete handler (which must check ownership of a vault
+/// that may already be soft-deleted).
+pub async fn get_including_deleted(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
+    self.vaults
+        .find_by_id_including_deleted(id)
+        .await
+        .map_err(VaultStoreError::Database)?
+        .ok_or_else(|| VaultStoreError::NotFound(id.to_string()))
+}
+
+/// Soft-delete a vault: stamp `deleted_at` without removing the row
+/// (BE-044 / issue #281). Idempotent for an already-deleted vault
+/// (`NotFound` if it does not exist).
+pub async fn soft_delete(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
+    let now = Utc::now();
+    let affected = self
+        .vaults
+        .soft_delete(id, now)
+        .await
+        .map_err(VaultStoreError::Database)?;
+    if affected == 0 {
+        return Err(VaultStoreError::NotFound(id.to_string()));
+    }
+    self.get_including_deleted(id).await
+}
+
+/// Restore a soft-deleted vault by clearing `deleted_at` (BE-044 / #281).
+pub async fn restore(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
+    let now = Utc::now();
+    let affected = self
+        .vaults
+        .restore(id, now)
+        .await
+        .map_err(VaultStoreError::Database)?;
+    if affected == 0 {
+        return Err(VaultStoreError::NotFound(id.to_string()));
+    }
+    self.get_including_deleted(id).await
+}
+
 /// Verify that `manager_id` (UUID) belongs to the authenticated Stellar address.
 async fn verify_ownership(
     state: &crate::AppState,
@@ -232,9 +285,7 @@ async fn verify_ownership(
         .find_by_stellar_address(&user.stellar_address)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
-        .ok_or_else(|| {
-            AppError::Unauthorized("Manager not found for authenticated user".into())
-        })?;
+        .ok_or_else(|| AppError::Unauthorized("Manager not found for authenticated user".into()))?;
     if manager.id != manager_id {
         return Err(AppError::Unauthorized(
             "You can only access vaults belonging to your own manager account".into(),
@@ -243,8 +294,12 @@ async fn verify_ownership(
     Ok(())
 }
 
-fn list_vaults_default_page() -> u32 { 1 }
-fn list_vaults_default_page_size() -> u32 { 50 }
+fn list_vaults_default_page() -> u32 {
+    1
+}
+fn list_vaults_default_page_size() -> u32 {
+    50
+}
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ListVaultsQuery {
@@ -315,7 +370,11 @@ pub async fn create_vault_handler(
         ));
     }
     let vault = state.vault_store.create(&payload).await?;
-    crate::audit_log::log_audit_event(&payload.manager_id, "vault_provisioning", &payload.manager_id);
+    crate::audit_log::log_audit_event(
+        &payload.manager_id,
+        "vault_provisioning",
+        &payload.manager_id,
+    );
     Ok(Json(vault))
 }
 
@@ -374,6 +433,140 @@ pub async fn update_vault_handler(
     Ok(Json(vault))
 }
 
+/// Gate a handler on admin privileges.
+///
+/// There is no admin role in the JWT claims today, so admin authority is an
+/// allow-list of Stellar addresses sourced from the `PERIGEE_ADMIN_STELLAR_ADDRESSES`
+/// environment variable (comma-separated). Requests from any other address are
+/// rejected with `401 Unauthorized`. (BE-044 / issue #281.)
+fn require_admin(user: &AuthenticatedUser) -> Result<(), AppError> {
+    let allowed = std::env::var("PERIGEE_ADMIN_STELLAR_ADDRESSES").unwrap_or_default();
+    let is_admin = allowed
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .any(|addr| addr == user.stellar_address);
+    if is_admin {
+        Ok(())
+    } else {
+        Err(AppError::Unauthorized(
+            "Admin privileges required to perform this action".into(),
+        ))
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/vaults/{id}",
+    params(("id" = String, Path, description = "Vault ID")),
+    responses(
+        (status = 200, description = "Vault soft-deleted", body = VaultRecord),
+        (status = 404, description = "Vault not found")
+    ),
+    tag = "Vaults"
+)]
+pub async fn soft_delete_vault_handler(
+    State(state): State<Arc<crate::AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(id): Path<String>,
+) -> Result<Json<VaultRecord>, AppError> {
+    // Ownership is checked against the (possibly deleted) vault so the owner can
+    // still delete their own vault.
+    let vault = state.vault_store.get_including_deleted(&id).await?;
+    verify_ownership(&state, &user, &vault.manager_id).await?;
+    let vault = state.vault_store.soft_delete(&id).await?;
+    crate::audit_log::log_audit_event(&vault.manager_id, "vault_soft_delete", &vault.manager_id);
+    Ok(Json(vault))
+}
+
+#[utoipa::path(
+    post,
+    path = "/vaults/{id}/restore",
+    params(("id" = String, Path, description = "Vault ID")),
+    responses(
+        (status = 200, description = "Vault restored", body = VaultRecord),
+        (status = 403, description = "Admin privileges required"),
+        (status = 404, description = "Vault not found")
+    ),
+    tag = "Vaults"
+)]
+pub async fn restore_vault_handler(
+    State(state): State<Arc<crate::AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(id): Path<String>,
+) -> Result<Json<VaultRecord>, AppError> {
+    require_admin(&user)?;
+    let vault = state.vault_store.restore(&id).await?;
+    crate::audit_log::log_audit_event(&vault.manager_id, "vault_restore", &vault.manager_id);
+    Ok(Json(vault))
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ListDeletedVaultsQuery {
+    /// Optional manager to scope the listing to.
+    pub manager_id: Option<String>,
+    #[serde(default = "list_vaults_default_page")]
+    pub page: u32,
+    #[serde(default = "list_vaults_default_page_size")]
+    pub page_size: u32,
+}
+
+#[utoipa::path(
+    get,
+    path = "/admin/vaults/deleted",
+    params(
+        ("manager_id" = Option<String>, Query, description = "Optional manager ID to scope the listing"),
+        ("page" = Option<u32>, Query, description = "Page number (1-indexed, default 1)"),
+        ("page_size" = Option<u32>, Query, description = "Records per page (default 50, max 200)")
+    ),
+    responses(
+        (status = 200, description = "Paginated list of soft-deleted vaults", body = PagedResponse<VaultRecord>),
+        (status = 403, description = "Admin privileges required")
+    ),
+    tag = "Vaults"
+)]
+pub async fn list_deleted_vaults_handler(
+    State(state): State<Arc<crate::AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Query(query): Query<ListDeletedVaultsQuery>,
+) -> Result<Json<crate::db::models::PagedResponse<VaultRecord>>, AppError> {
+    require_admin(&user)?;
+    let pagination = crate::db::models::PaginationParams {
+        page: query.page,
+        page_size: query.page_size,
+    };
+    let (limit, offset) = pagination.to_limit_offset();
+
+    let (data, total_count) = match &query.manager_id {
+        Some(manager_id) => state
+            .vault_store
+            .vaults
+            .list_deleted_by_manager(manager_id, limit, offset)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+        None => state
+            .vault_store
+            .vaults
+            .list_all_deleted(limit, offset)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+    };
+
+    let page = pagination.page.max(1);
+    let page_size = pagination
+        .page_size
+        .clamp(1, crate::db::models::PaginationParams::MAX_PAGE_SIZE);
+    let has_more = offset + limit < total_count;
+
+    Ok(Json(crate::db::models::PagedResponse {
+        data,
+        total_count,
+        page,
+        page_size,
+        has_more,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,7 +591,8 @@ mod tests {
                 version INTEGER NOT NULL DEFAULT 1,
                 idempotency_key TEXT,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TIMESTAMP
             )
             "#,
         )
@@ -825,18 +1019,27 @@ mod tests {
                 .unwrap();
         }
 
-        let page1 = store.list_by_manager("mgr-pg", &pagination(1, 2)).await.unwrap();
+        let page1 = store
+            .list_by_manager("mgr-pg", &pagination(1, 2))
+            .await
+            .unwrap();
         assert_eq!(page1.data.len(), 2);
         assert_eq!(page1.total_count, 5);
         assert_eq!(page1.page, 1);
         assert_eq!(page1.page_size, 2);
         assert!(page1.has_more);
 
-        let page2 = store.list_by_manager("mgr-pg", &pagination(2, 2)).await.unwrap();
+        let page2 = store
+            .list_by_manager("mgr-pg", &pagination(2, 2))
+            .await
+            .unwrap();
         assert_eq!(page2.data.len(), 2);
         assert!(page2.has_more);
 
-        let page3 = store.list_by_manager("mgr-pg", &pagination(3, 2)).await.unwrap();
+        let page3 = store
+            .list_by_manager("mgr-pg", &pagination(3, 2))
+            .await
+            .unwrap();
         assert_eq!(page3.data.len(), 1);
         assert!(!page3.has_more);
     }
@@ -844,7 +1047,10 @@ mod tests {
     #[tokio::test]
     async fn list_by_manager_paginated_empty_for_unknown_manager() {
         let store = test_store().await;
-        let result = store.list_by_manager("unknown-mgr", &pagination(1, 50)).await.unwrap();
+        let result = store
+            .list_by_manager("unknown-mgr", &pagination(1, 50))
+            .await
+            .unwrap();
         assert!(result.data.is_empty());
         assert_eq!(result.total_count, 0);
         assert!(!result.has_more);
@@ -864,7 +1070,10 @@ mod tests {
             .await
             .unwrap();
 
-        let result = store.list_by_manager("mgr-clamp", &pagination(1, 9999)).await.unwrap();
+        let result = store
+            .list_by_manager("mgr-clamp", &pagination(1, 9999))
+            .await
+            .unwrap();
         assert_eq!(result.page_size, 200);
         assert_eq!(result.total_count, 1);
     }
@@ -883,9 +1092,85 @@ mod tests {
             .await
             .unwrap();
 
-        let result = store.list_by_manager("mgr-eof", &pagination(10, 50)).await.unwrap();
+        let result = store
+            .list_by_manager("mgr-eof", &pagination(10, 50))
+            .await
+            .unwrap();
         assert!(result.data.is_empty());
         assert_eq!(result.total_count, 1);
         assert!(!result.has_more);
+    }
+
+    // ── BE-044 (#281): soft deletes ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn soft_delete_excludes_vault_from_default_listing() {
+        let store = test_store().await;
+        let created = store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-soft".into(),
+                name: "To Delete".into(),
+                status: "active".into(),
+                config_json: "{}".into(),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        store.soft_delete(&created.id).await.unwrap();
+
+        // Default `get` no longer finds the vault.
+        assert!(store.get(&created.id).await.is_err());
+
+        // Default listing excludes it.
+        let listed = store
+            .list_by_manager("mgr-soft", &pagination(1, 50))
+            .await
+            .unwrap();
+        assert!(listed.data.is_empty());
+        assert_eq!(listed.total_count, 0);
+
+        // It can still be located via the admin-inclusive path.
+        let fetched = store.get_including_deleted(&created.id).await.unwrap();
+        assert!(fetched.deleted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn restore_returns_vault_to_default_queries() {
+        let store = test_store().await;
+        let created = store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-restore".into(),
+                name: "Restore Me".into(),
+                status: "active".into(),
+                config_json: "{}".into(),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        store.soft_delete(&created.id).await.unwrap();
+        assert!(store.get(&created.id).await.is_err());
+
+        let restored = store.restore(&created.id).await.unwrap();
+        assert!(restored.deleted_at.is_none());
+
+        // Default `get` works again.
+        let fetched = store.get(&created.id).await.unwrap();
+        assert_eq!(fetched.id, created.id);
+
+        // And it reappears in the default listing.
+        let listed = store
+            .list_by_manager("mgr-restore", &pagination(1, 50))
+            .await
+            .unwrap();
+        assert_eq!(listed.total_count, 1);
+    }
+
+    #[tokio::test]
+    async fn soft_delete_of_missing_vault_is_not_found() {
+        let store = test_store().await;
+        assert!(store.soft_delete("does-not-exist").await.is_err());
+        assert!(store.restore("does-not-exist").await.is_err());
     }
 }

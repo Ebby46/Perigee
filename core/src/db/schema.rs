@@ -110,12 +110,11 @@ impl ManagersTable {
             .fetch_all(&*self.pool)
             .await?;
 
-            let (count,): (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM managers WHERE status = ?1",
-            )
-            .bind(status)
-            .fetch_one(&*self.pool)
-            .await?;
+            let (count,): (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM managers WHERE status = ?1")
+                    .bind(status)
+                    .fetch_one(&*self.pool)
+                    .await?;
 
             (rows, count)
         } else {
@@ -197,8 +196,23 @@ impl VaultsTable {
         &self,
         id: &str,
     ) -> Result<Option<crate::db::models::VaultRecord>, sqlx::Error> {
+        // Default queries exclude soft-deleted vaults (BE-044 / issue #281).
         sqlx::query_as::<_, crate::db::models::VaultRecord>(
-            "SELECT id, manager_id, name, status, config_json, version, idempotency_key, created_at, updated_at FROM vaults WHERE id = ?1",
+            "SELECT id, manager_id, name, status, config_json, version, idempotency_key, created_at, updated_at, deleted_at FROM vaults WHERE id = ?1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&*self.pool)
+        .await
+    }
+
+    /// Like [`find_by_id`](Self::find_by_id) but includes soft-deleted vaults.
+    /// Used by the admin restore path, which must locate a deleted vault.
+    pub async fn find_by_id_including_deleted(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::db::models::VaultRecord>, sqlx::Error> {
+        sqlx::query_as::<_, crate::db::models::VaultRecord>(
+            "SELECT id, manager_id, name, status, config_json, version, idempotency_key, created_at, updated_at, deleted_at FROM vaults WHERE id = ?1",
         )
         .bind(id)
         .fetch_optional(&*self.pool)
@@ -211,7 +225,7 @@ impl VaultsTable {
         key: &str,
     ) -> Result<Option<crate::db::models::VaultRecord>, sqlx::Error> {
         sqlx::query_as::<_, crate::db::models::VaultRecord>(
-            "SELECT id, manager_id, name, status, config_json, version, idempotency_key, created_at, updated_at FROM vaults WHERE manager_id = ?1 AND idempotency_key = ?2",
+            "SELECT id, manager_id, name, status, config_json, version, idempotency_key, created_at, updated_at, deleted_at FROM vaults WHERE manager_id = ?1 AND idempotency_key = ?2 AND deleted_at IS NULL",
         )
         .bind(manager_id)
         .bind(key)
@@ -247,7 +261,8 @@ impl VaultsTable {
     }
 
     /// Paginated list of vaults for a given manager, ordered newest-first.
-    /// Returns `(rows, total_count)`.
+    /// Returns `(rows, total_count)`. Soft-deleted vaults are excluded
+    /// (BE-044 / issue #281).
     pub async fn list_by_manager_paginated(
         &self,
         manager_id: &str,
@@ -255,8 +270,8 @@ impl VaultsTable {
         offset: i64,
     ) -> Result<(Vec<crate::db::models::VaultRecord>, i64), sqlx::Error> {
         let rows = sqlx::query_as::<_, crate::db::models::VaultRecord>(
-            "SELECT id, manager_id, name, status, config_json, version, idempotency_key, created_at, updated_at \
-             FROM vaults WHERE manager_id = ?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
+            "SELECT id, manager_id, name, status, config_json, version, idempotency_key, created_at, updated_at, deleted_at \
+             FROM vaults WHERE manager_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
         )
         .bind(manager_id)
         .bind(limit)
@@ -264,9 +279,91 @@ impl VaultsTable {
         .fetch_all(&*self.pool)
         .await?;
 
+        let (total,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM vaults WHERE manager_id = ?1 AND deleted_at IS NULL",
+        )
+        .bind(manager_id)
+        .fetch_one(&*self.pool)
+        .await?;
+
+        Ok((rows, total))
+    }
+
+    /// Soft-delete a vault by stamping `deleted_at`. Returns the number of rows
+    /// affected (0 if the vault does not exist or is already deleted).
+    pub async fn soft_delete(
+        &self,
+        id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, sqlx::Error> {
+        let result =
+            sqlx::query("UPDATE vaults SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL")
+                .bind(now)
+                .bind(id)
+                .execute(&*self.pool)
+                .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Restore a soft-deleted vault by clearing `deleted_at`.
+    pub async fn restore(
+        &self,
+        id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, sqlx::Error> {
+        let result =
+            sqlx::query("UPDATE vaults SET deleted_at = NULL, updated_at = ?1 WHERE id = ?2")
+                .bind(now)
+                .bind(id)
+                .execute(&*self.pool)
+                .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Paginated list of *soft-deleted* vaults for a manager (admin view).
+    pub async fn list_deleted_by_manager(
+        &self,
+        manager_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<crate::db::models::VaultRecord>, i64), sqlx::Error> {
+        let rows = sqlx::query_as::<_, crate::db::models::VaultRecord>(
+            "SELECT id, manager_id, name, status, config_json, version, idempotency_key, created_at, updated_at, deleted_at \
+             FROM vaults WHERE manager_id = ?1 AND deleted_at IS NOT NULL ORDER BY deleted_at DESC LIMIT ?2 OFFSET ?3",
+        )
+        .bind(manager_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&*self.pool)
+        .await?;
+
+        let (total,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM vaults WHERE manager_id = ?1 AND deleted_at IS NOT NULL",
+        )
+        .bind(manager_id)
+        .fetch_one(&*self.pool)
+        .await?;
+
+        Ok((rows, total))
+    }
+
+    /// Paginated list of *all* soft-deleted vaults across managers (admin view).
+    pub async fn list_all_deleted(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<crate::db::models::VaultRecord>, i64), sqlx::Error> {
+        let rows = sqlx::query_as::<_, crate::db::models::VaultRecord>(
+            "SELECT id, manager_id, name, status, config_json, version, idempotency_key, created_at, updated_at, deleted_at \
+             FROM vaults WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC LIMIT ?1 OFFSET ?2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&*self.pool)
+        .await?;
+
         let (total,): (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
-                .bind(manager_id)
+            sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE deleted_at IS NOT NULL")
                 .fetch_one(&*self.pool)
                 .await?;
 
@@ -356,18 +453,21 @@ impl ReconciliationReportsTable {
         .fetch_all(&*self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|r| crate::db::models::ReconciliationReport {
-            id: r.0,
-            from_ledger: r.1,
-            to_ledger: r.2,
-            tolerance_pct: r.3,
-            total_ledgers: r.4,
-            discrepancies_count: r.5,
-            avg_delta_pct: r.6,
-            max_delta_pct: r.7,
-            summary: r.8.and_then(|v| serde_json::from_value(v).ok()),
-            created_at: r.9,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::db::models::ReconciliationReport {
+                id: r.0,
+                from_ledger: r.1,
+                to_ledger: r.2,
+                tolerance_pct: r.3,
+                total_ledgers: r.4,
+                discrepancies_count: r.5,
+                avg_delta_pct: r.6,
+                max_delta_pct: r.7,
+                summary: r.8.and_then(|v| serde_json::from_value(v).ok()),
+                created_at: r.9,
+            })
+            .collect())
     }
 
     pub async fn insert(
