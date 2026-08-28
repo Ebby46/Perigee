@@ -28,6 +28,10 @@ sha2 = "0.10"
 # sha2 above; hand-rolling HMAC is not worth the risk.
 hmac = "0.12"
 argon2 = "0.5"
+# BE-043 (#280): constant-time comparisons for secret hash verification to
+# close a timing side channel. `subtle` is already pulled in transitively by
+# `argon2`/`password-hash`, so this just makes it a direct dependency.
+subtle = "2.6.1"
 thiserror = "1.0"
 dotenvy = "0.15"
 config = "0.14"
