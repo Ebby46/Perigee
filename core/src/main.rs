@@ -62,7 +62,7 @@ use crate::jobs::{JobQueue, JobQueueConfig, JobWorker};
 use crate::merkle_tree::MerkleTree;
 use crate::reconciliation::FeeReconciler;
 use crate::rpc_provider::{ProviderRegistry, RegistryConfig, RegistrySnapshot, RpcProvider};
-use crate::simulation::{SimulationEngine, SimulationMode, SimulationResult};
+use crate::simulation::{SimulationEngine, SimulationMode, SimulationResult, SorobanResources};
 use crate::stellar_service::{StellarService, StellarServiceConfig};
 use crate::ws::SimulationBus;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -1604,6 +1604,11 @@ pub struct GasGolfingRequest {
     /// Contract name for identification
     #[schema(example = "my_contract")]
     pub contract_name: String,
+    /// Protocol version whose Soroban resource prices should be used.
+    pub protocol_version: Option<u32>,
+    /// Measured resources from a Soroban simulation. Without this, savings
+    /// remain unquantified because static WASM analysis cannot measure hosts.
+    pub measured_resources: Option<SorobanResources>,
 }
 
 impl Validate for GasGolfingRequest {
@@ -1653,10 +1658,19 @@ async fn analyze_gas_golfing(
 
     let contract_name = payload.contract_name.clone();
 
+    let analyzer = match payload.protocol_version {
+        Some(version) => GasGolfingAnalyzer::for_protocol_version(version)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?,
+        None => state.gas_golfing_analyzer.clone(),
+    };
+    let measured_resources = payload.measured_resources;
+
     let report = tokio::task::spawn_blocking(move || {
-        state
-            .gas_golfing_analyzer
-            .analyze_wasm(&wasm_bytes, &contract_name)
+        analyzer.analyze_wasm_with_measurement(
+            &wasm_bytes,
+            &contract_name,
+            measured_resources.as_ref(),
+        )
     })
     .await
     .map_err(|e| AppError::Internal(format!("Gas golfing analysis task panicked: {}", e)))?;
