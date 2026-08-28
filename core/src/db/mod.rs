@@ -1,3 +1,4 @@
+pub mod migrations;
 pub mod models;
 pub mod schema;
 
@@ -17,7 +18,7 @@ pub type Pool = SqlitePool;
 
 pub async fn init_pool(database_url: &str) -> Result<Pool, sqlx::Error> {
     let pool = SqlitePool::connect(database_url).await?;
-    sqlx::migrate!().run(&pool).await?;
+    migrations::run_migrations(&pool).await?;
     Ok(pool)
 }
 
