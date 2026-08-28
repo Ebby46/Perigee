@@ -2220,6 +2220,19 @@ async fn main() {
         return;
     }
 
+    // ── CLI: migrate subcommand ──────────────────────────────────────────
+    if args.len() > 1 && args[1] == "migrate" {
+        tracing::info!(database_url = %config.database_url, "Running database migrations");
+        let db_pool = sqlx::SqlitePool::connect(&config.database_url)
+            .await
+            .expect("Failed to connect to database");
+        crate::db::migrations::run_migrations(&db_pool)
+            .await
+            .expect("Failed to run database migrations");
+        println!("Database migrations applied successfully.");
+        return;
+    }
+
     tracing::info!("Starting Perigee API Server...");
 
     let auth_state = Arc::new(auth::AuthState::new(
@@ -2285,9 +2298,8 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    // Run migrations
-    sqlx::migrate!()
-        .run(&db_pool)
+    // Run migrations (idempotent; tracked in sqlx's _sqlx_migrations table).
+    crate::db::migrations::run_migrations(&db_pool)
         .await
         .expect("Failed to run database migrations");
 
