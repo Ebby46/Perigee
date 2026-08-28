@@ -3,6 +3,9 @@ name = "Perigee-core"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+fuzz = []
+
 [lib]
 name = "Perigee_core"
 path = "src/lib.rs"
