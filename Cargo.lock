@@ -47,6 +47,7 @@ dependencies = [
  "uuid",
  "wasm-encoder",
  "wasmparser 0.240.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

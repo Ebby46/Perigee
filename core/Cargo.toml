@@ -55,6 +55,9 @@ wasm-encoder = { version = "0.240", features = ["wasmparser"] }
 wasmparser = "0.240"
 rayon = "1.8"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 proptest = "1.4.0"
 # `ServiceExt::oneshot` in main.rs's router tests lives behind this feature.
