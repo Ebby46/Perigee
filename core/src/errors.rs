@@ -97,28 +97,24 @@ impl AppError {
         }
     }
 
-    fn status_code(&self) -> StatusCode {
+    pub fn error_code(&self) -> ErrorCode {
         match self {
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
-            Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
-            Self::Conflict(_) => StatusCode::CONFLICT,
-            Self::PolicyExpired(_) => StatusCode::FORBIDDEN,
+            Self::Internal(_) => ErrorCode::InternalServerError,
+            Self::NotFound(_) => ErrorCode::NotFound,
+            Self::BadRequest(_) => ErrorCode::BadRequest,
+            Self::Unauthorized(_) => ErrorCode::Unauthorized,
+            Self::TooManyRequests(_) => ErrorCode::TooManyRequests,
+            Self::Conflict(_) => ErrorCode::Conflict,
+            Self::PolicyExpired(_) => ErrorCode::PolicyExpired,
         }
     }
 
+    fn status_code(&self) -> StatusCode {
+        self.error_code().status_code()
+    }
+
     fn error_type(&self) -> &'static str {
-        match self {
-            Self::Internal(_) => "INTERNAL_SERVER_ERROR",
-            Self::NotFound(_) => "NOT_FOUND",
-            Self::BadRequest(_) => "BAD_REQUEST",
-            Self::Unauthorized(_) => "UNAUTHORIZED",
-            Self::TooManyRequests(_) => "TOO_MANY_REQUESTS",
-            Self::Conflict(_) => "CONFLICT",
-            Self::PolicyExpired(_) => "POLICY_EXPIRED",
-        }
+        self.error_code().as_str()
     }
 
     /// The client-visible message for this error.
@@ -162,30 +158,27 @@ impl AppError {
     }
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct ErrorResponse {
-    /// Error type identifier (e.g., "NOT_FOUND", "BAD_REQUEST")
-    error: String,
-    /// Human-readable error message
-    message: String,
-}
+pub use crate::error_codes::{ErrorCode, ErrorResponse};
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status_code();
+        let code = self.error_code();
 
         // Log the full diagnostic detail server-side regardless of environment.
         // Sensitive details never reach the HTTP response body in production.
         tracing::error!(
-            error_type = self.error_type(),
+            error_type = code.as_str(),
             status = status.as_u16(),
             detail = self.diagnostic(),
             "Request failed"
         );
 
         let body = Json(ErrorResponse {
-            error: self.error_type().to_string(),
+            code: code.as_str().to_string(),
+            error: code.as_str().to_string(),
             message: self.client_message(),
+            details: None,
         });
 
         (status, body).into_response()
