@@ -2459,7 +2459,15 @@ async fn main() {
         .route("/vaults", get(vault_store::list_vaults_handler).post(vault_store::create_vault_handler))
         .route(
             "/vaults/:id",
-            get(vault_store::get_vault_handler).patch(vault_store::update_vault_handler),
+            get(vault_store::get_vault_handler).patch(vault_store::update_vault_handler).delete(vault_store::soft_delete_vault_handler),
+        )
+        .route(
+            "/vaults/:id/restore",
+            post(vault_store::restore_vault_handler),
+        )
+        .route(
+            "/admin/vaults/deleted",
+            get(vault_store::list_deleted_vaults_handler),
         )
         .route_layer(axum::middleware::from_fn(auth::auth_middleware));
 

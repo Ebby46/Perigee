@@ -95,6 +95,9 @@ pub struct VaultRecord {
     pub idempotency_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Set when the vault is soft-deleted (BE-044 / issue #281). `None` means the
+    /// vault is active. Default queries filter rows where this is `NULL`.
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
