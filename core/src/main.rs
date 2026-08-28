@@ -472,6 +472,7 @@ pub struct AppState {
     /// Process-wide Stellar RPC transport (pooled client, retry, circuit-breaker).
     stellar_service: Arc<StellarService>,
     cache: Arc<SimulationCache>,
+    insights_cache: Arc<crate::cache::InsightsCache>,
     insights_engine: InsightsEngine,
     gas_golfing_analyzer: GasGolfingAnalyzer,
     /// Simulation timeout for RPC requests
@@ -1007,150 +1008,44 @@ fn to_report(
 async fn analyze(
     State(state): State<Arc<AppState>>,
     ValidatedJson(payload): ValidatedJson<AnalyzeRequest>,
-) -> Result<(HeaderMap, Json<ResourceReport>), AppError> {
-    // Create a tracing span with structured fields for this request
+) -> Result<(HeaderMap, Json<crate::jobs::SubmitJobResponse>), AppError> {
     let span = tracing::info_span!(
         "analyze",
         contract_id = %payload.contract_id,
         function_name = %payload.function_name,
     );
     let _enter = span.enter();
+    tracing::info!("Received analyze request, offloading to background task");
 
-    tracing::info!("Received analyze request");
-
-    let args = payload.args.clone().unwrap_or_default();
-    let cache_key =
-        SimulationCache::generate_key(&payload.contract_id, &payload.function_name, &args);
-
-    // Track simulation latency
-    let start_time = std::time::Instant::now();
-
-    let (result, cache_status): (SimulationResult, &'static str) =
-        if let Some(cached) = state.cache.get(&cache_key).await {
-            tracing::debug!("Cache HIT for key: {}", cache_key);
-            (cached, "HIT")
-        } else {
-            tracing::debug!("Cache MISS for key: {}", cache_key);
-
-            // Wrap the simulation call with a timeout to prevent hanging
-            let sim_result = tokio::time::timeout(
-                state.simulation_timeout,
-                state.engine.simulate_from_contract_id(
-                    &payload.contract_id,
-                    &payload.function_name,
-                    args,
-                    payload.ledger_overrides.clone(),
-                    payload.protocol_version,
-                    payload.enable_experimental,
-                ),
-            )
-            .await
-            .map_err(|_| {
-                state
-                    .metrics
-                    .rpc_error_count_total
-                    .with_label_values(&["/analyze", "timeout"])
-                    .inc();
-                tracing::error!("Simulation timed out after {:?}", state.simulation_timeout);
-                AppError::Internal(format!(
-                    "Simulation timed out after {} seconds",
-                    state.simulation_timeout.as_secs()
-                ))
-            })?;
-
-            let sim: SimulationResult = match sim_result {
-                Ok(sim) => sim,
-                Err(err) => {
-                    state
-                        .metrics
-                        .rpc_error_count_total
-                        .with_label_values(&["/analyze", "simulation_error"])
-                        .inc();
-                    return Err(err.into());
-                }
-            };
-            state.cache.set(cache_key, sim.clone()).await;
-            (sim, "MISS")
-        };
-
-    let latency_ms = start_time.elapsed().as_millis() as u64;
-    state
-        .metrics
-        .simulation_latency_seconds
-        .with_label_values(&["/analyze"])
-        .observe(start_time.elapsed().as_secs_f64());
-    state
-        .metrics
-        .simulation_requests_total
-        .with_label_values(&["/analyze", cache_status])
-        .inc();
-
-    // Log comprehensive simulation metrics
-    tracing::info!(
-        latency_ms = latency_ms,
-        cache_status = cache_status,
-        cpu_instructions = result.resources.cpu_instructions,
-        ram_bytes = result.resources.ram_bytes,
-        ledger_read_bytes = result.resources.ledger_read_bytes,
-        ledger_write_bytes = result.resources.ledger_write_bytes,
-        transaction_size_bytes = result.resources.transaction_size_bytes,
-        cost_stroops = result.cost_stroops,
-        latest_ledger = result.latest_ledger,
-        "Simulation completed successfully"
-    );
-
-    state.cache.log_stats();
-    let insights_report = state.insights_engine.analyze(&result.resources);
-    state
-        .metrics
-        .resource_utilization_percent
-        .with_label_values(&["efficiency_score"])
-        .set(insights_report.efficiency_score as f64);
-
-    // Generate Merkle tree root if requested
-    let merkle_tree_root = if payload.include_merkle_tree.unwrap_or(false) {
-        result.state_snapshot.as_ref().and_then(|snapshot| {
-            // Extract ledger entries as leaves for the Merkle tree
-            let leaves: Vec<Vec<u8>> = snapshot
-                .ledger_entries
-                .values()
-                .filter_map(|entry_b64| hex::decode(entry_b64).ok())
-                .collect();
-
-            if leaves.is_empty() {
-                tracing::warn!("No ledger entries available for Merkle tree generation");
-                None
-            } else {
-                let mut tree = MerkleTree::new(256);
-                let mut tree = MerkleTree::new(32);
-                if let Err(e) = tree.build(leaves) {
-                    tracing::error!("Failed to generate Merkle tree: {}", e);
-                    None
-                } else {
-                    tracing::info!("Generated Merkle tree with {} leaves", tree.leaf_count);
-                    tracing::info!("Generated Merkle tree with {} leaves", tree.leaf_count());
-                    Some(tree.get_root_hex())
-                }
-            }
-        })
-    } else {
-        None
-    };
+    let job_id = state
+        .job_queue
+        .submit(
+            crate::jobs::JobType::Analyze,
+            crate::jobs::JobPayload::Analyze {
+                contract_id: payload.contract_id,
+                function_name: payload.function_name,
+                args: payload.args,
+                ledger_overrides: payload.ledger_overrides,
+            },
+            None,
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
-        HeaderName::from_static("x-Perigee-cache"),
-        HeaderValue::from_static(cache_status),
-    );
-    headers.insert(
-        HeaderName::from_static("x-Perigee-latency-ms"),
-        HeaderValue::from_str(&latency_ms.to_string())
+        HeaderName::from_static("x-perigee-job"),
+        HeaderValue::from_str(&job_id.to_string())
             .unwrap_or_else(|_| HeaderValue::from_static("0")),
     );
 
     Ok((
         headers,
-        Json(to_report(&result, &state.insights_engine, merkle_tree_root)),
+        Json(crate::jobs::SubmitJobResponse {
+            job_id: job_id.to_string(),
+            status: crate::jobs::JobStatus::Queued,
+            message: "Simulation and analysis job submitted".to_string(),
+        }),
     ))
 }
 
@@ -2361,6 +2256,7 @@ async fn main() {
     // ── WebSocket event bus ─────────────────────────────────────────────
     let simulation_bus = SimulationBus::new();
 
+    let insights_cache = crate::cache::InsightsCache::new();
     let job_worker = JobWorker::new(
         job_queue.clone(),
         SimulationEngine::with_registry_and_timeout_and_mode(
@@ -2370,6 +2266,7 @@ async fn main() {
         )
         .with_stellar_service(Arc::clone(&stellar_service)),
         InsightsEngine::new(),
+        insights_cache.clone(),
         job_queue_config,
     )
     .with_bus(Arc::clone(&simulation_bus))
@@ -2399,6 +2296,7 @@ async fn main() {
         SimulationEngine::with_registry_and_timeout(Arc::clone(&registry), simulation_timeout)
             .with_stellar_service(Arc::clone(&stellar_service)),
         InsightsEngine::new(),
+        insights_cache.clone(),
         job_config,
     );
 
@@ -2464,6 +2362,7 @@ async fn main() {
         provider_registry: Arc::clone(&registry),
         stellar_service: Arc::clone(&stellar_service),
         cache: simulation_cache,
+        insights_cache,
         insights_engine: InsightsEngine::new(),
         gas_golfing_analyzer: GasGolfingAnalyzer::new(),
         simulation_timeout,
@@ -2882,6 +2781,7 @@ mod tests {
         let app_state = Arc::new(AppState {
             engine: SimulationEngine::new("https://test.example.com".to_string()),
             cache: SimulationCache::new(),
+            insights_cache: crate::cache::InsightsCache::new(),
             insights_engine: InsightsEngine::new(),
             simulation_timeout: std::time::Duration::from_secs(30),
         });
