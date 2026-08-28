@@ -2236,18 +2236,9 @@ async fn main() {
 
     tracing::info!("Starting Perigee API Server...");
 
-    let auth_state = Arc::new(auth::AuthState::new(
-        config.jwt_private_key.clone(),
-        None,
-        config.network_passphrase.clone(),
-        config.emergency_verification_paused,
-    ));
-    tracing::info!(
-        "SEP-10 server account: {}",
-        auth_state.server_stellar_address()
-    );
     // ── Multi-node RPC setup ────────────────────────────────────────────
     let providers = build_providers(&config);
+    let startup_providers = providers.clone();
     let provider_names: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
     tracing::info!(providers = ?provider_names, "RPC provider pool");
 
@@ -2289,7 +2280,35 @@ async fn main() {
         Arc::clone(&registry),
         StellarServiceConfig::default().with_timeout(simulation_timeout),
     ));
+
+    for provider in &startup_providers {
+        if let Err(error) = stellar_service
+            .validate_network_passphrase(provider, &config.network_passphrase)
+            .await
+        {
+            tracing::error!(
+                provider = %provider.name,
+                url = %provider.url,
+                error = %error,
+                "Stellar network validation failed at startup; refusing to initialize signing"
+            );
+            panic!("Stellar network validation failed: {}", error);
+        }
+    }
     tracing::info!("StellarService initialized (pooled client, retry, circuit-breaker)");
+
+    // Construct signing state only after every configured RPC provider has
+    // proved that it is connected to the expected Stellar network.
+    let auth_state = Arc::new(auth::AuthState::new(
+        config.jwt_private_key.clone(),
+        None,
+        config.network_passphrase.clone(),
+        config.emergency_verification_paused,
+    ));
+    tracing::info!(
+        "SEP-10 server account: {}",
+        auth_state.server_stellar_address()
+    );
 
     // ── Fee Market Setup ────────────────────────────────────────────────
     let database_url = &config.database_url;
